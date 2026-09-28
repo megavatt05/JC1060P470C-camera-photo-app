@@ -85,7 +85,7 @@ menu "Example Boards Types"
 
     choice
         prompt "Choose the Boards Types"
-        default BOARD_TYPE_JC1060P470
+        default BOARD_TYPE_JC4880P443
             config BOARD_TYPE_JC4880P443
                 bool "JC4880P4433"
 
