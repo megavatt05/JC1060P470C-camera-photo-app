@@ -1,6 +1,9 @@
 # ESP-IDF 6.0.x / 5.5.x — JC1060P470C_I_W_Y camera photo app
 # Board: ESP32-P4 rev v1.3 + OV02C10 + JD9165 1024x600
 #
+# NOTE: Full OV02C10 + esp_video 1.2 stack is most stable on IDF 5.5.x.
+# IDF 6.0.3 has multiple issues with P4 rev < 3.0 (efuse/pmu, esp_ipa headers).
+#
 CONFIG_IDF_TARGET="esp32p4"
 
 # Chip revision: ESP32-P4 v1.3 (eco2) — MUST use <3.0 path
@@ -37,13 +40,14 @@ CONFIG_CAMERA_OV02C10_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
 CONFIG_CAMERA_OV02C10_MIPI_RAW10_1288x728_30FPS=y
 # CONFIG_CAMERA_OV02C10_ISP_AF_ENABLE is not set
 
-# IDF 6 + esp_video 1.2: ISP pipeline controller needs esp_ipa ~1.1 which
-# does not compile on IDF 6 (hal/isp_types.h). Disable controller; HW ISP
-# demosaic still works for RAW10→RGB565 preview.
+# Avoid esp_ipa 1.1 header issues on IDF 6 (still may be generated from JSON)
 # CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER is not set
 
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
-CONFIG_PM_ENABLE=y
+
+# IDF 6.0.3 + P4 rev <3.0: pmu_sleep.c uses efuse_ll_get_controller_state
+# which is missing from hw_ver1 headers → build fails. Disable PM.
+# CONFIG_PM_ENABLE is not set
 
 # IDF 6: warnings-as-errors can break third-party components during migration
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
