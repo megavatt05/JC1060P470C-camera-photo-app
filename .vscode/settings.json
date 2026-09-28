@@ -3,7 +3,9 @@
     "idf.openOcdConfigs": [
         "board/esp32p4-ftdi.cfg"
     ],
-    "idf.customExtraVars": {},
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32p4"
+    },
     "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
     "clangd.arguments": [
       "--background-index",
