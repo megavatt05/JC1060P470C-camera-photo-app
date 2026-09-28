@@ -1,13 +1,19 @@
 dependencies:
-  idf: '>=5.3'
+  idf: '>=5.4'
 
+  # Keep 1.2.x — compatible with local esp_cam_sensor 1.2.1 (OV02C10).
+  # esp_video 2.x requires esp_cam_sensor 2.6+ which has no OV02C10.
   esp_video:
-    version: '*'
+    version: "~1.2.0"
     public: true
+
+  # Required on ESP-IDF 6.0+ for USB Serial/JTAG / HS tooling on P4
+  espressif/usb:
+    version: "*"
 
   espressif/esp_lcd_ek79007:
     version: 1.*
     public: true
-  espressif/esp_lcd_jd9365: ^1.0.2
-  espressif/esp_lcd_jd9165: '*'
-  espressif/esp_lcd_st7701: '*'
+  espressif/esp_lcd_jd9365: "^1.0.2"
+  espressif/esp_lcd_jd9165: "*"
+  espressif/esp_lcd_st7701: "*"

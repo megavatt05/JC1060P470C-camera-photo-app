@@ -8,4 +8,4 @@ set(EXTRA_COMPONENT_DIRS
     
 add_compile_options(-Wno-maybe-uninitialized)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(camera_photo_app)
+project(video_lcd_display)
