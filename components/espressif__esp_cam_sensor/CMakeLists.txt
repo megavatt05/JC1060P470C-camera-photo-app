@@ -1,14 +1,20 @@
 set(srcs "src/esp_cam_sensor.c" "src/esp_cam_sensor_xclk.c" "src/esp_cam_motor.c")
 
-list(APPEND srcs "src/driver_cam/esp_cam_ctlr_spi_cam.c")
-
-if(CONFIG_SPIRAM)
-    list(APPEND srcs "src/driver_spi/spi_slave.c")
+# SPI camera path (esp_cam_ctlr_spi_cam + bundled spi_slave) is incompatible with ESP-IDF 6.0+:
+#   - esp_private/spi_slave_internal.h removed / relocated
+#   - bundled spi_slave.c conflicts with IDF driver
+# OV02C10 on JC1060P470C uses MIPI-CSI only — skip SPI sources entirely.
+# (On IDF 5.5 with SPI sensors you would need cam_sensor >= 2.0.1 instead.)
+if(IDF_VERSION_MAJOR LESS 6)
+    list(APPEND srcs "src/driver_cam/esp_cam_ctlr_spi_cam.c")
+    if(CONFIG_SPIRAM)
+        list(APPEND srcs "src/driver_spi/spi_slave.c")
+    endif()
 endif()
 
 set(include_dirs "include")
 set(requires "driver" "esp_sccb_intf" "esp_driver_cam")
-set(priv_requires "esp_driver_gpio" "esp_timer")
+set(priv_requires "esp_driver_gpio" "esp_timer" "esp_pm")
 
 if(CONFIG_CAMERA_XCLK_USE_LEDC)
     list(APPEND requires "esp_driver_ledc")
@@ -80,18 +86,6 @@ if(CONFIG_CAMERA_SC030IOT)
     list(APPEND priv_include_dirs "sensors/sc030iot/private_include")
 endif()
 
-if(CONFIG_CAMERA_OV2710)
-    list(APPEND srcs "sensors/ov2710/ov2710.c")
-    list(APPEND include_dirs "sensors/ov2710/include")
-    list(APPEND priv_include_dirs "sensors/ov2710/private_include")
-endif()
-
-if(CONFIG_CAMERA_SC035HGS)
-    list(APPEND srcs "sensors/sc035hgs/sc035hgs.c")
-    list(APPEND include_dirs "sensors/sc035hgs/include")
-    list(APPEND priv_include_dirs "sensors/sc035hgs/private_include")
-endif()
-
 if(CONFIG_CAMERA_BF3901)
     list(APPEND srcs "sensors/bf3901/bf3901.c")
     list(APPEND include_dirs "sensors/bf3901/include")
@@ -110,7 +104,7 @@ if(CONFIG_CAMERA_BF3A03)
     list(APPEND priv_include_dirs "sensors/bf3a03/private_include")
 endif()
 
-if(CONFIG_CAM_MOTOR_DW9714)
+if(CONFIG_CAMERA_MOTOR_DW9714)
     list(APPEND srcs "motors/dw9714/dw9714.c")
     list(APPEND include_dirs "motors/dw9714/include")
     list(APPEND priv_include_dirs "motors/dw9714/private_include")
@@ -121,75 +115,6 @@ idf_component_register(SRCS ${srcs}
                        PRIV_INCLUDE_DIRS ${priv_include_dirs}
                        REQUIRES ${requires}
                        PRIV_REQUIRES ${priv_requires}
-                       LDFRAGMENTS linker.lf)
-
-if(CONFIG_CAMERA_OV2640_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov2640_detect")
-endif()
-
-if(CONFIG_CAMERA_OV5640_AUTO_DETECT_MIPI_INTERFACE_SENSOR OR CONFIG_CAMERA_OV5640_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov5640_detect")
-endif()
-
-if(CONFIG_CAMERA_OV5645_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov5645_detect")
-endif()
-
-if(CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov5647_detect")
-endif()
-
-if(CONFIG_CAMERA_OV02C10_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov02c10_detect")
-endif()
-
-if(CONFIG_CAMERA_SC2336_AUTO_DETECT_MIPI_INTERFACE_SENSOR OR CONFIG_CAMERA_SC2336_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u sc2336_detect")
-endif()
-
-if(CONFIG_CAMERA_SC202CS_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u sc202cs_detect")
-endif()
-
-if(CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u gc0308_detect")
-endif()
-
-if(CONFIG_CAMERA_GC2145_AUTO_DETECT_MIPI_INTERFACE_SENSOR OR CONFIG_CAMERA_GC2145_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u gc2145_detect")
-endif()
-
-if(CONFIG_CAMERA_SC101IOT_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u sc101iot_detect")
-endif()
-
-if(CONFIG_CAMERA_SC030IOT_AUTO_DETECT_DVP_INTERFACE_SENSOR OR CONFIG_CAMERA_SC030IOT_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u sc030iot_detect")
-endif()
-
-if(CONFIG_CAMERA_OV2710_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ov2710_detect")
-endif()
-
-if(CONFIG_CAMERA_SC035HGS_AUTO_DETECT_MIPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u sc035hgs_detect")
-endif()
-
-if(CONFIG_CAMERA_BF3901_AUTO_DETECT_SPI_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u bf3901_detect")
-endif()
-
-if(CONFIG_CAMERA_BF3925_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u bf3925_detect")
-endif()
-
-if(CONFIG_CAMERA_BF3A03_AUTO_DETECT_DVP_INTERFACE_SENSOR)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u bf3a03_detect")
-endif()
-
-if(CONFIG_CAM_MOTOR_DW9714_AUTO_DETECT)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u dw9714_detect")
-endif()
-
-include(package_manager)
-cu_pkg_define_version(${CMAKE_CURRENT_LIST_DIR})
+                       LDFRAGMENTS linker.lf
+                       WHOLE_ARCHIVE
+                       )
