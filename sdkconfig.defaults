@@ -1,12 +1,10 @@
-# ESP-IDF 6.0.x / 5.5.x — JC1060P470C_I_W_Y camera photo app
+# ESP-IDF 5.5.x / 6.0.x — JC1060P470C_I_W_Y camera photo app
 # Board: ESP32-P4 rev v1.3 + OV02C10 + JD9165 1024x600
-#
-# NOTE: Full OV02C10 + esp_video 1.2 stack is most stable on IDF 5.5.x.
-# IDF 6.0.3 has multiple issues with P4 rev < 3.0 (efuse/pmu, esp_ipa headers).
+# Recommended: ESP-IDF 5.5.5 (proven ~30 fps).
+# IDF 6.0.3: local cam_sensor 1.2.1 + tools/patch_esp_ipa_idf6.ps1
 #
 CONFIG_IDF_TARGET="esp32p4"
 
-# Chip revision: ESP32-P4 v1.3 (eco2) — MUST use <3.0 path
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 # CONFIG_ESP32P4_REV_MIN_300 is not set
 # CONFIG_ESP32P4_REV_MIN_301 is not set
@@ -15,39 +13,30 @@ CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# IDF 6: larger bootloader — partition table at 0x10000
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x10000
 
-# JC1060P470C board + camera I2C (SCCB)
 CONFIG_EXAMPLE_MIPI_CSI_SCCB_I2C_SCL_PIN=8
 CONFIG_EXAMPLE_MIPI_CSI_SCCB_I2C_SDA_PIN=7
 CONFIG_BOARD_TYPE_JC1060P470=y
 
-# PSRAM
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LWIP_HOOK_IP6_INPUT_NONE=y
 
-# Camera OV02C10 — 1288x728 (1080p causes ISP fifo overflow on P4 v1.3)
 CONFIG_CAMERA_OV02C10=y
 CONFIG_CAMERA_OV02C10_AUTO_DETECT=y
 CONFIG_CAMERA_OV02C10_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
-# CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920x1080_30FPS is not set
 CONFIG_CAMERA_OV02C10_MIPI_RAW10_1288x728_30FPS=y
+# CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920x1080_30FPS is not set
 # CONFIG_CAMERA_OV02C10_ISP_AF_ENABLE is not set
+CONFIG_CAMERA_OV02C10_DEFAULT_IPA_JSON_CONFIGURATION_FILE=y
 
-# Avoid esp_ipa 1.1 header issues on IDF 6 (still may be generated from JSON)
-# CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER is not set
-
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 
-# IDF 6.0.3 + P4 rev <3.0: pmu_sleep.c uses efuse_ll_get_controller_state
-# which is missing from hw_ver1 headers → build fails. Disable PM.
 # CONFIG_PM_ENABLE is not set
-
-# IDF 6: warnings-as-errors can break third-party components during migration
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
