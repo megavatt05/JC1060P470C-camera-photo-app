@@ -1,7 +1,7 @@
 # ESP-IDF 5.5.x / 6.0.x — JC1060P470C_I_W_Y camera photo app
 # Board: ESP32-P4 rev v1.3 + OV02C10 + JD9165 1024x600
 # Recommended: ESP-IDF 5.5.5 (proven ~30 fps).
-# IDF 6.0.3: local cam_sensor 1.2.1 + tools/patch_esp_ipa_idf6.ps1
+# IDF 6.0.3: local cam_sensor 1.2.1 + patch_idf6_managed_components.py
 #
 CONFIG_IDF_TARGET="esp32p4"
 
