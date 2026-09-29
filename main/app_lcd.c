@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: CC0-1.0
  */
 #include "driver/gpio.h"
+#include "esp_idf_version.h"
 #include "esp_ldo_regulator.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
@@ -431,7 +432,8 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,     
         .dpi_clock_freq_mhz = 60,                        
         .virtual_channel = 0,                            
-        .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,                       
+        .in_color_format  = LCD_COLOR_FMT_RGB565,
+        .out_color_format = LCD_COLOR_FMT_RGB565,
         .num_fbs = EXAMPLE_LCD_BUF_NUM,                                    
         .video_timing = {                                
             .h_size = 800,                               
@@ -443,7 +445,9 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
             .vsync_pulse_width = 4,                      
             .vsync_front_porch = 20,                     
         },                                               
-        .flags.use_dma2d = true,                         
+        #if ESP_IDF_VERSION_MAJOR < 6
+        .flags.use_dma2d = true,
+#endif
     };
 #elif CONFIG_BOARD_TYPE_JC4880P443
     ESP_LOGI(TAG, "Install LCD driver of st7701");
@@ -451,7 +455,8 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,  
         .dpi_clock_freq_mhz = 34,                     
         .virtual_channel = 0,                         
-        .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,                    
+        .in_color_format  = LCD_COLOR_FMT_RGB565,
+        .out_color_format = LCD_COLOR_FMT_RGB565,
         .num_fbs = EXAMPLE_LCD_BUF_NUM,                                 
         .video_timing = {                             
             .h_size = 480,                            
@@ -463,7 +468,9 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
             .vsync_pulse_width = 2,                     
             .vsync_front_porch = 166,                  
         },                                            
-        .flags.use_dma2d = true,                      
+        #if ESP_IDF_VERSION_MAJOR < 6
+        .flags.use_dma2d = true,
+#endif
     };
 
 #elif    CONFIG_BOARD_TYPE_JC1060P470
@@ -471,7 +478,8 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,  
         .dpi_clock_freq_mhz = 52,                     
         .virtual_channel = 0,                         
-        .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,                    
+        .in_color_format  = LCD_COLOR_FMT_RGB565,
+        .out_color_format = LCD_COLOR_FMT_RGB565,
         .num_fbs = EXAMPLE_LCD_BUF_NUM,                                 
         .video_timing = {                             
             .h_size = 1024,                            
@@ -483,7 +491,9 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
             .vsync_pulse_width = 10,                     
             .vsync_front_porch = 12,                  
         },                                            
-        .flags.use_dma2d = true,                      
+        #if ESP_IDF_VERSION_MAJOR < 6
+        .flags.use_dma2d = true,
+#endif
     };
 
 #endif
@@ -546,6 +556,11 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
 #endif
     ESP_ERROR_CHECK(esp_lcd_panel_reset(display_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(display_handle));
+
+#if ESP_IDF_VERSION_MAJOR >= 6
+    /* ESP-IDF 6.0: флаг .flags.use_dma2d удалён — DMA2D включается функцией после init */
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_enable_dma2d(display_handle));
+#endif
 
     *panel_handle = display_handle;
 

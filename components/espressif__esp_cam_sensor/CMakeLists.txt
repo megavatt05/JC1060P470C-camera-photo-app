@@ -13,7 +13,9 @@ if(IDF_VERSION_MAJOR LESS 6)
 endif()
 
 set(include_dirs "include")
-set(requires "driver" "esp_sccb_intf" "esp_driver_cam")
+# ESP-IDF 6.0: публичный заголовок esp_cam_ctlr_spi.h инклудит driver/spi_slave.h —
+# в IDF 6 мета-компонент driver больше не прокидывает инклуды esp_driver_*, добавляем явно
+set(requires "driver" "esp_sccb_intf" "esp_driver_cam" "esp_driver_spi")
 set(priv_requires "esp_driver_gpio" "esp_timer" "esp_pm")
 
 if(CONFIG_CAMERA_XCLK_USE_LEDC)

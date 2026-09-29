@@ -59,11 +59,15 @@ cd JC1060P470C-camera-photo-app
 # IDF 6.0.3
 . $HOME/esp/esp-idf/export.sh   # путь к вашему IDF 6.0.3
 
-rm -f sdkconfig
+rm -rf build managed_components dependencies.lock sdkconfig
 idf.py set-target esp32p4
+./patch_idf6_managed_components.sh   # патчит managed_components под IDF 6 (обязательно)
 idf.py build
 idf.py -p COMx flash monitor
 ```
+
+> На IDF 5.5.x скрипт не нужен — просто `set-target` + `build`.
+> Подробности и Windows-вариант: [docs/BUILD_IDF6.md](docs/BUILD_IDF6.md).
 
 Ожидаемый лог:
 
@@ -95,6 +99,7 @@ https://github.com/megavatt05/ESP32P4-JC1060P470C-I_W_Y/tree/example/camera-phot
 ├── CMakeLists.txt
 ├── sdkconfig.defaults
 ├── partitions.csv          # IDF 6: offset ≥ 0x11000
+├── patch_idf6_managed_components.sh   # патч managed_components под IDF 6 (после set-target)
 ├── main/
 │   ├── main.c
 │   ├── app_lcd.c / .h
