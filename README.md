@@ -57,7 +57,7 @@ esp_video:
 как и esp_cam_sensor с OV02C10. Ничего патчить не нужно: просто клонируйте и собирайте.
 
 ```bash
-git clone -b idf603-build-fixes https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
+git clone https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
 cd JC1060P470C-camera-photo-app
 
 . $HOME/esp/esp-idf/export.sh   # ваше окружение IDF 6.0.3 (Windows: export.ps1)
@@ -74,7 +74,9 @@ idf.py -p COMx flash monitor
 > Для IDF 5.5.5 используйте исходный рабочий репозиторий:
 > https://github.com/megavatt05/ESP32P4-JC1060P470C-I_W_Y/tree/example/camera-photo-app
 >
-> Подробности и история адаптации: [docs/BUILD_IDF6.md](docs/BUILD_IDF6.md).
+> Подробности: [docs/BUILD_IDF6.md](docs/BUILD_IDF6.md); полная история фиксов
+> (все 9 изменений с кодом до/после, разбор рантайм-фикса CSI):
+> [docs/FIXES_IDF603.md](docs/FIXES_IDF603.md).
 
 Ожидаемый лог:
 
@@ -92,6 +94,8 @@ app_main: fps: ~30
 ## Документация
 
 - [docs/CAMERA_DISPLAY.md](docs/CAMERA_DISPLAY.md) — полное описание пайплайна, пинов, init
+- [docs/FIXES_IDF603.md](docs/FIXES_IDF603.md) — полный документ фиксов: история миграции на IDF 6.0.3, разбор рантайм-фикса CSI
+- [docs/BUILD_IDF6.md](docs/BUILD_IDF6.md) — процедура сборки на IDF 6 (Linux/Windows)
 - [CAMERA_PHOTO_APP.md](CAMERA_PHOTO_APP.md) — краткая шпаргалка
 
 Исходная рабочая ветка (IDF 5.5.x):  
@@ -118,5 +122,8 @@ https://github.com/megavatt05/ESP32P4-JC1060P470C-I_W_Y/tree/example/camera-phot
 │   ├── espressif__esp_ipa/            # v1.1.0, адаптирована под IDF 6
 │   └── espressif__esp_lcd_jd9365/     # v1.0.4, адаптирована под IDF 6
 └── docs/
-    └── CAMERA_DISPLAY.md
+    ├── BUILD_IDF6.md
+    ├── CAMERA_DISPLAY.md
+    ├── FIXES_IDF603.md
+    └── OV02C10_IDF6_PLAN.md
 ```

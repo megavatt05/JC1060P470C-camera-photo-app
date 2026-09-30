@@ -1,4 +1,4 @@
-# Сборка JC1060P470C-camera-photo-app (ветка idf603-build-fixes)
+# Сборка JC1060P470C-camera-photo-app (ESP-IDF 6.0.3, ветка main)
 
 ## ESP-IDF 6.0.3 — сборка без патчей
 
@@ -8,12 +8,15 @@
 видит локальные копии и **не скачивает** эти компоненты из registry —
 `managed_components/` после `set-target` содержит только нетронутые компоненты.
 
-Ничего патчить, запускать скрипты или чистить не нужно:
+Ничего патчить, запускать скрипты или чистить не нужно.
+
+> Полная история адаптации, детальный разбор каждого из 9 фиксов (с кодом до/после)
+> и рантайм-фикса CSI: [docs/FIXES_IDF603.md](FIXES_IDF603.md).
 
 **Windows (ESP-IDF PowerShell / CMD):**
 
 ```powershell
-git clone -b idf603-build-fixes https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
+git clone https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
 cd JC1060P470C-camera-photo-app
 . C:\esp\v6.0.3\esp-idf\export.ps1
 idf.py set-target esp32p4
@@ -24,7 +27,7 @@ idf.py -p COMx flash monitor
 **Linux / macOS:**
 
 ```bash
-git clone -b idf603-build-fixes https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
+git clone https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
 cd JC1060P470C-camera-photo-app
 . $HOME/esp/esp-idf/export.sh
 idf.py set-target esp32p4
@@ -38,7 +41,7 @@ idf.py -p /dev/ttyUSBx flash monitor
 `patch_esp_ipa_idf6.ps1` / `patch_idf6_managed_components.py`):
 
 ```bash
-git checkout idf603-build-fixes
+git checkout main
 git pull
 rm -rf build managed_components sdkconfig     # переключиться на components/
 idf.py set-target esp32p4
@@ -111,9 +114,10 @@ CSI DMA → буфер → дисплей.
 Используйте исходный рабочий репозиторий:
 https://github.com/megavatt05/ESP32P4-JC1060P470C-I_W_Y/tree/example/camera-photo-app
 
-Ветка idf603-build-fixes целится в IDF 6.0.x: патчи в `components/` применены
-безусловно (большинство из них обратно совместимы с 5.5, но комбинация
-целиком на 5.5.5 не проверялась).
+Ветка `idf603-build-fixes` (коммиты `b267b43` → `a0d244f` → `50087da` → `12725dc`)
+слита в `main` merge-коммитом `c76f602` и сохранена как архив. Ветки целились в
+IDF 6.0.x: патчи в `components/` применены безусловно (большинство из них обратно
+совместимы с 5.5, но комбинация целиком на 5.5.5 не проверялась).
 
 ## История (почему не скрипты)
 
