@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_attr.h"
 #include "esp_check.h"
+#include "esp_idf_version.h"
 #include "esp_private/esp_cache_private.h"
 #include "esp_ldo_regulator.h"
 #include "esp_cam_ctlr.h"
@@ -401,7 +402,18 @@ static esp_err_t csi_video_start(struct esp_video *video, uint32_t type)
         .h_res = CAPTURE_VIDEO_GET_FORMAT_WIDTH(video),
         .v_res = CAPTURE_VIDEO_GET_FORMAT_HEIGHT(video),
         .data_lane_num = csi_video->state.lane_num,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+        /* ESP-IDF 6.0: аппаратная конверсия цвета в CSI bridge недоступна на
+         * ESP32-P4 ревизий ниже v3.0 — esp_cam_new_csi_ctlr() возвращает
+         * ESP_ERR_NOT_SUPPORTED из s_csi_ctlr_format_conversion().
+         * CSI DMA принимает выход ISP, поэтому на IDF 6 входной цвет CSI
+         * объявляем равным выходному — драйвер выбирает режим bypass.
+         * Аналогично espressif/esp_video 2.x (esp_video_csi_format.c,
+         * ветка "Old chip: CSI cannot convert"). */
+        .input_data_color_type = csi_video->state.out_color,
+#else
         .input_data_color_type = csi_video->state.in_color,
+#endif
         .output_data_color_type = csi_video->state.out_color,
         .lane_bit_rate_mbps = csi_video->state.lane_bitrate_mbps,
 #if CONFIG_ESP_VIDEO_DISABLE_MIPI_CSI_DRIVER_BACKUP_BUFFER

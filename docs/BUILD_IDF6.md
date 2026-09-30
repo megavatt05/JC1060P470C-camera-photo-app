@@ -63,13 +63,36 @@ idf.py build
 | 4 | esp_video isp | `case CAM_CTLR_COLOR_YUV422` → 4 варианта (YUYV/UYVY/YVYU/VYUY); `COLOR_SPACE_TYPE()==COLOR_SPACE_RAW` → локальный макрос `COLOR_SPACE_TYPE_IS_RAW()` (удалены в IDF 6) |
 | 5 | esp_video csi/dvp/spi | `CAM_CTLR_COLOR_YUV422` → `CAM_CTLR_COLOR_YUV422_YUYV` |
 | 6 | esp_lcd_jd9365 | `panel_dev_config->color_space` → `rgb_ele_order` |
-| 7 | esp_cam_sensor (CMakeLists) | + `esp_driver_spi` в requires (`esp_cam_ctlr_spi.h` инклудит `driver/spi_slave.h`) |
-| 8 | app_lcd.c | `pixel_format` → `in_color_format`/`out_color_format` (`LCD_COLOR_FMT_RGB565`); `.flags.use_dma2d` → `esp_lcd_dpi_panel_enable_dma2d()` под `#if IDF>=6` |
+| 7 | esp_video csi (runtime!) | на IDF 6 вход CSI = выход (RGB565): без этого `esp_cam_new_csi_ctlr` возвращает NOT_SUPPORTED на чипах < v3.0 (конверсия в CSI bridge запрещена), как в esp_video 2.x |
+| 8 | esp_cam_sensor (CMakeLists) | + `esp_driver_spi` в requires (`esp_cam_ctlr_spi.h` инклудит `driver/spi_slave.h`) |
+| 9 | app_lcd.c | `pixel_format` → `in_color_format`/`out_color_format` (`LCD_COLOR_FMT_RGB565`); `.flags.use_dma2d` → `esp_lcd_dpi_panel_enable_dma2d()` под `#if IDF>=6` |
 
-Правки 1–6 выполнены в копиях компонентов внутри `components/` (раньше
+Правки 1–7 выполнены в копиях компонентов внутри `components/` (раньше
 применялись скриптом к `managed_components/` после каждого `set-target` —
 это и было источником ошибок, если шаг пропускали или выполняли в другом
-порядке). Правки 7–8 — в обычных файлах репозитория.
+порядке). Правки 8–9 — в обычных файлах репозитория.
+
+### Рантайм-фикс CSI (чипы ревизии < v3.0, включая v1.3 платы JC1060P470C)
+
+Симптом: прошивка собирается и грузится, сенсор детектируется, но при старте
+потока:
+
+```
+E CSI: esp_cam_new_csi_ctlr(227): failed to configure format conversion
+csi_video: video->ops->start=106 (ESP_ERR_NOT_SUPPORTED)
+```
+
+Причина: в IDF 6.0 драйвер CSI безусловно вызывает настройку аппаратной
+конверсии цвета в CSI bridge, а на ESP32-P4 ревизий ниже v3.0 она запрещена
+(проверка `ESP_CHIP_REV_ABOVE(chip_version, 300)`). В IDF 5.5.5 этой проверки
+не было вовсе — конверсию RAW10→RGB565 всегда выполнял ISP, а цвета в
+конфиге CSI использовались только для расчёта размеров буферов.
+
+Решение (фикс №7 в таблице, как в официальном esp_video 2.x): на IDF 6
+входной цвет CSI объявляется равным выходному (RGB565) — DMA и так принимает
+выход ISP, а драйвер CSI выбирает режим bypass вместо запрещённой конверсии.
+Конвейер не меняется: сенсор RAW10 → ISP (demosaic + конверсия в RGB565) →
+CSI DMA → буфер → дисплей.
 
 ## Результат верификации (IDF 6.0.3, esp32p4)
 
