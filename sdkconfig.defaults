@@ -54,3 +54,24 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 
 # CONFIG_PM_ENABLE is not set
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
+
+# --- Диагностика: расследование Load access fault в кадровой цепочке ---
+# Краш происходит в esp_vfs_ioctl (чтение vfs->vfs->ioctl по мусорному
+# указателю) при VIDIOC_QBUF из video_stream_task. vfs_entry_t и копия
+# fs_ops аллоцируются с MALLOC_CAP_DEFAULT и при 32MB PSRAM в пуле могут
+# попасть в PSRAM, где их способно затоптать DMA/переполнение буфера.
+#
+# 1) Подробное логирование: per-frame размер принятого кадра
+#    (csi_video: size=NNN), путь DQBUF/QBUF, ISP/AE активность.
+#    В IDF 6 уровни — choice-символы, поэтому именно так:
+CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+#
+# 2) Структуры VFS (то, что затирается при краше) принудительно во
+#    внутреннюю RAM: если краш исчезнет - источник порчи памяти в PSRAM.
+CONFIG_VFS_SELECT_IN_RAM=y
+#
+# 3) Полное «отравление» кучи: canary вокруг каждого блока, abort с
+#    адресом при первой же попытке malloc/free затёртого блока - ловит
+#    источник порчи с поличным.
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
