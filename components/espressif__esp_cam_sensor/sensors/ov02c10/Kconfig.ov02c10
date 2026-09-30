@@ -28,13 +28,29 @@ if CAMERA_OV02C10
         help
             Select the default format to load when the sensor is detected.
             When the sensor is in stream off state, the format can be changed.
-    
+            1920x1080 is the maximum resolution on ESP32-P4: the internal ISP
+            accepts up to ISP_LL_HSIZE_MAX x ISP_LL_VSIZE_MAX = 1920x1280.
+            The 2-lane mode additionally requires the second CSI data lane
+            to be wired on the board.
+
         config CAMERA_OV02C10_MIPI_RAW10_1288x728_30FPS
             bool "RAW10 1288x728 30fps, MIPI 1lane 24M input"
+            help
+                Windowed 720p mode, ~45 percent of the sensor area. Safest
+                timing margin, recommended default.
         config CAMERA_OV02C10_MIPI_RAW10_1920x1080_30FPS
             bool "RAW10 1920x1080 30fps, MIPI 1lane 24M input"
+            help
+                Full 2MP resolution of the OV02C10. Camera buffers grow to
+                about 4.1 MB each in RGB565 (2 buffers = 8.3 MB PSRAM).
+                Select the "Scale to fit (letterbox)" display mode or a
+                centered 1024x600 crop will be shown on the JC1060P470 LCD.
         config CAMERA_OV02C10_MIPI_RAW10_1920x1080_2LAN_30FPS
             bool "RAW10 1920x1080 30fps, MIPI 2lane 24M input"
+            help
+                Same output as the 1-lane 1080p mode but uses both CSI data
+                lanes (VTS 2328). Verify the board routes the second lane
+                before using this mode.
     endchoice # CAMERA_OV02C10_MIPI_DEFAULT_FMT
 
     config CAMERA_OV02C10_MIPI_IF_FORMAT_INDEX_DAFAULT

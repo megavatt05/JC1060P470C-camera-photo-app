@@ -1089,11 +1089,40 @@ static const ov02c10_gain_t ov02c10_gain_map[] = {
      return ret;
  }
  
- static esp_err_t ov02c10_set_test_pattern(esp_cam_sensor_device_t *dev, int enable)
- {
-     ESP_LOGI(TAG,"test color = %d",enable);
-     return ov02c10_set_reg_bits(dev->sccb_handle, 0x4503, 7, 1, enable ? 0x01 : 0x00);
- }
+/*
+ * Test pattern control, compatible with the Linux kernel driver
+ * (drivers/media/i2c/ov02c10.c, (c) 2022 Intel Corporation, GPL-2.0):
+ *   register 0x4503: bit[7] = pattern enable, bits[1:0] = pattern type.
+ *
+ * pattern: 0 - disabled
+ *          1 - Color Bar
+ *          2 - Top-Bottom Darker Color Bar
+ *          3 - Right-Left Darker Color Bar
+ *          4 - Color Bar type 4
+ */
+static esp_err_t ov02c10_set_test_pattern(esp_cam_sensor_device_t *dev, int pattern)
+{
+    esp_err_t ret = ESP_OK;
+
+    if ((pattern < 0) || (pattern > 4)) {
+        ESP_LOGE(TAG, "test pattern %d is invalid, valid range is 0-4", pattern);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!pattern) {
+        return ov02c10_set_reg_bits(dev->sccb_handle, 0x4503, 7, 1, 0x00);
+    }
+
+    ret = ov02c10_set_reg_bits(dev->sccb_handle, 0x4503, 0, 2, pattern - 1);
+    if (ret == ESP_OK) {
+        ret = ov02c10_set_reg_bits(dev->sccb_handle, 0x4503, 7, 1, 0x01);
+    }
+    ESP_LOGI(TAG, "test pattern = %d (%s)", pattern,
+             pattern == 1 ? "Color Bar" :
+             pattern == 2 ? "Top-Bottom Darker Color Bar" :
+             pattern == 3 ? "Right-Left Darker Color Bar" : "Color Bar type 4");
+    return ret;
+}
  
  static esp_err_t ov02c10_hw_reset(esp_cam_sensor_device_t *dev)
  {
@@ -1247,6 +1276,79 @@ static const ov02c10_gain_t ov02c10_gain_map[] = {
     return ret;
 }
 
+/*
+ * Default VTS for every entry of ov02c10_isp_info[].
+ * Kept separately because the VBLANK control mutates the cached
+ * isp_v1_info.vts at runtime (see ov02c10_set_vblank()).
+ */
+static const uint32_t ov02c10_isp_info_vts_default[] = {
+    1164, /* MIPI_1lane_24Minput_RAW10_1288x728_30fps  */
+    1164, /* MIPI_1lane_24Minput_RAW10_1920x1080_30fps */
+    2328, /* MIPI_2lane_24Minput_RAW10_1920x1080_30fps */
+};
+
+#define OV02C10_VTS_MAX 0xffff /* VTS registers 0x380e/0x380f are 16-bit */
+
+/*
+ * Vertical blanking (frame rate) control, following the Linux kernel driver
+ * (drivers/media/i2c/ov02c10.c, (c) 2022 Intel Corporation, GPL-2.0):
+ *
+ *   fps = pclk / (hts * vts),  vts = height + vblank
+ *
+ * Increasing vblank lowers the frame rate and extends the maximum exposure
+ * (max exposure = VTS - OV02C10_EXP_MAX_OFFSET lines). The lower bound is
+ * the mode default VTS, so the frame rate can only be reduced, never pushed
+ * above the 30 fps the MIPI timing is dimensioned for.
+ *
+ * The cached isp_info vts is updated as well so exposure unit conversions
+ * (EXPOSURE_V4L2_TO_OV02C10 etc.) and the AE loop stay consistent.
+ *
+ * Note: ov02c10_isp_info[] is statically shared; this driver manages a
+ * single camera instance, so the runtime mutation is safe. A mode switch
+ * (ov02c10_set_format) restores the default VTS from the table above.
+ */
+static esp_err_t ov02c10_set_vblank(esp_cam_sensor_device_t *dev, uint32_t vblank)
+{
+    esp_err_t ret;
+    struct ov02c10_cam *cam_ov02c10 = (struct ov02c10_cam *)dev->priv;
+    uint32_t height = dev->cur_format->height;
+    uint32_t vts = vblank + height;
+    uint32_t vts_min;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(ov02c10_isp_info); i++) {
+        if (dev->cur_format->isp_info == &ov02c10_isp_info[i]) {
+            break;
+        }
+    }
+    if (i >= ARRAY_SIZE(ov02c10_isp_info)) {
+        ESP_LOGE(TAG, "current format has no matching isp_info entry");
+        return ESP_ERR_INVALID_STATE;
+    }
+    vts_min = ov02c10_isp_info_vts_default[i];
+
+    if (vts < vts_min) {
+        ESP_LOGE(TAG, "vblank %" PRIu32 " is too small, VTS must be >= %" PRIu32, vblank, vts_min);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (vts > OV02C10_VTS_MAX) {
+        ESP_LOGE(TAG, "vblank %" PRIu32 " is too large, VTS must be <= %d", vblank, OV02C10_VTS_MAX);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = ov02c10_write(dev->sccb_handle, 0x380e, (uint8_t)(vts >> 8));
+    ret |= ov02c10_write(dev->sccb_handle, 0x380f, (uint8_t)(vts & 0xff));
+    if (ret == ESP_OK) {
+        esp_cam_sensor_isp_info_t *isp_info = (esp_cam_sensor_isp_info_t *)dev->cur_format->isp_info;
+        isp_info->isp_v1_info.vts = vts;
+        cam_ov02c10->ov02c10_para.exposure_max = vts - OV02C10_EXP_MAX_OFFSET;
+        ESP_LOGI(TAG, "set vblank %" PRIu32 ", VTS=%" PRIu32 ", approx fps=%.2f",
+                 vblank, vts,
+                 (double)isp_info->isp_v1_info.pclk / ((double)isp_info->isp_v1_info.hts * vts));
+    }
+    return ret;
+}
+
 static esp_err_t ov02c10_query_para_desc(esp_cam_sensor_device_t *dev, esp_cam_sensor_param_desc_t *qdesc)
 {
     esp_err_t ret = ESP_OK;
@@ -1275,6 +1377,23 @@ static esp_err_t ov02c10_query_para_desc(esp_cam_sensor_device_t *dev, esp_cam_s
         qdesc->type = ESP_CAM_SENSOR_PARAM_TYPE_U8;
         qdesc->u8.size = sizeof(esp_cam_sensor_gh_exp_gain_t);
         break;
+    case ESP_CAM_SENSOR_VBLANK: {
+        int i;
+        uint32_t vts_min = OV02C10_VTS_MAX;
+        for (i = 0; i < ARRAY_SIZE(ov02c10_isp_info); i++) {
+            if (dev->cur_format->isp_info == &ov02c10_isp_info[i]) {
+                vts_min = ov02c10_isp_info_vts_default[i];
+                break;
+            }
+        }
+        qdesc->type = ESP_CAM_SENSOR_PARAM_TYPE_NUMBER;
+        /* minimum keeps the mode default frame rate, maximum follows the 16-bit VTS register */
+        qdesc->number.minimum = vts_min - dev->cur_format->height;
+        qdesc->number.maximum = OV02C10_VTS_MAX - dev->cur_format->height;
+        qdesc->number.step = 1;
+        qdesc->default_value = qdesc->number.minimum;
+        break;
+    }
     case ESP_CAM_SENSOR_VFLIP:
     case ESP_CAM_SENSOR_HMIRROR:
         qdesc->type = ESP_CAM_SENSOR_PARAM_TYPE_NUMBER;
@@ -1299,6 +1418,10 @@ static esp_err_t ov02c10_get_para_value(esp_cam_sensor_device_t *dev, uint32_t i
     switch (id) {
     case ESP_CAM_SENSOR_EXPOSURE_VAL: {
         *(uint32_t *)arg = cam_ov02c10->ov02c10_para.exposure_val;
+        break;
+    }
+    case ESP_CAM_SENSOR_VBLANK: {
+        *(uint32_t *)arg = dev->cur_format->isp_info->isp_v1_info.vts - dev->cur_format->height;
         break;
     }
     case ESP_CAM_SENSOR_GAIN: {
@@ -1405,6 +1528,11 @@ static esp_err_t ov02c10_set_para_value(esp_cam_sensor_device_t *dev, uint32_t i
     case ESP_CAM_SENSOR_GAIN: {
         uint32_t u32_val = *(uint32_t *)arg;
         ret = ov02c10_set_total_gain_val(dev, u32_val);
+        break;
+    }
+    case ESP_CAM_SENSOR_VBLANK: {
+        uint32_t u32_val = *(uint32_t *)arg;
+        ret = ov02c10_set_vblank(dev, u32_val);
         break;
     }
     case ESP_CAM_SENSOR_GROUP_EXP_GAIN: {
@@ -1603,6 +1731,14 @@ static esp_err_t ov02c10_set_para_value(esp_cam_sensor_device_t *dev, uint32_t i
     }
 
     dev->cur_format = format;
+    /* Restore the default VTS in the (possibly runtime-mutated) isp_info cache:
+     * writing the mode register table has just reset the VTS register. */
+    for (int i = 0; i < ARRAY_SIZE(ov02c10_isp_info); i++) {
+        if (dev->cur_format->isp_info == &ov02c10_isp_info[i]) {
+            ((esp_cam_sensor_isp_info_t *)dev->cur_format->isp_info)->isp_v1_info.vts = ov02c10_isp_info_vts_default[i];
+            break;
+        }
+    }
     // init para
     cam_ov02c10->ov02c10_para.exposure_val = dev->cur_format->isp_info->isp_v1_info.exp_def;
     cam_ov02c10->ov02c10_para.gain_index = dev->cur_format->isp_info->isp_v1_info.gain_def;

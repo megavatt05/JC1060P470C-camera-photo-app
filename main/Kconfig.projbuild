@@ -79,6 +79,56 @@ menu "Example Configuration"
         help
             Select this option, enable camera sensor picture horizontal flip.
 
+    config EXAMPLE_CAM_TEST_PATTERN
+        int "Camera Sensor Test Pattern (0=off, 1..4)"
+        default 0
+        range 0 4
+        help
+            Overlay a sensor-generated test pattern instead of the live image.
+            Useful to verify the whole camera pipeline (MIPI-CSI, ISP, PPA, LCD)
+            without optics. Types follow the Linux kernel ov02c10 driver:
+              0 - disabled (live image)
+              1 - Color Bar
+              2 - Top-Bottom Darker Color Bar
+              3 - Right-Left Darker Color Bar
+              4 - Color Bar type 4
+            The pattern is applied right after the video device is opened,
+            before the stream starts.
+
+    config EXAMPLE_CAM_TARGET_FPS
+        int "Camera Frame Rate Override in fps (0=sensor mode default)"
+        default 0
+        range 0 30
+        help
+            Lower the camera frame rate below the sensor mode default (30 fps)
+            by increasing the vertical blanking (VTS registers 0x380e/0x380f).
+            Useful to allow longer maximum exposure in low light: the AE loop
+            can then integrate more light per frame. 0 keeps the sensor mode
+            default. The value cannot exceed the mode default because the MIPI
+            timing is dimensioned for it. Approximate result:
+            fps = pclk / (hts * vts).
+
+    choice EXAMPLE_CAM_DISPLAY_FIT
+        prompt "Camera to LCD display fit mode"
+        default EXAMPLE_CAM_DISPLAY_FIT_CROP
+        help
+            How the camera frame is mapped onto the 1024x600 LCD by the PPA.
+
+        config EXAMPLE_CAM_DISPLAY_FIT_CROP
+            bool "Crop center, 1:1 pixels"
+            help
+                Take a centered LCD-sized block from the camera frame without
+                scaling. Sharpest possible image; part of the frame outside
+                the LCD aspect ratio is not shown.
+
+        config EXAMPLE_CAM_DISPLAY_FIT_SCALE
+            bool "Scale to fit (letterbox)"
+            help
+                Scale the whole camera frame down to fit inside the LCD,
+                preserving the aspect ratio. Black bars are added where needed.
+                PPA scaling granularity is 1/16, e.g. 1920x1080 -> 960x540.
+    endchoice
+
 endmenu
 
 menu "Example Boards Types"

@@ -55,6 +55,10 @@ static const struct control_map s_sensor_control_map_table[] = {
         .v4l2_id = V4L2_CID_EXPOSURE,
     },
     {
+        .esp_cam_priv_id = ESP_CAM_SENSOR_VBLANK,
+        .v4l2_id = V4L2_CID_VBLANK,
+    },
+    {
         .esp_cam_priv_id = ESP_CAM_SENSOR_JPEG_QUALITY,
         .v4l2_id = V4L2_CID_JPEG_COMPRESSION_QUALITY,
     },

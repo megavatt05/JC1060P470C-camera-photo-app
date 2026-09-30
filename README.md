@@ -46,7 +46,27 @@ esp_video:
 2. **Partition table offset `0x10000`** + `partitions.csv` (первая запись с `0x11000`) — bootloader в IDF 6 больше.
 3. Зависимость **`espressif/usb`** — нужна для USB Serial/JTAG на P4 в IDF 6.
 4. `CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y` — в IDF 6 warnings по умолчанию как errors; сторонние компоненты (esp_video 1.2) могут иначе не собраться.
-5. Режим камеры **1288×728**, не 1080p — иначе `ISP: fifo overflow` на v1.3.
+5. Режим камеры **1288×728** (по умолчанию), не 1080p — на v1.3 в 720p гарантированный запас (1080p также доступен, см. ниже).
+
+---
+
+## Возможности камеры OV02C10 (ветка `ov02c10-full-capability`)
+
+В этой ветке разоблокирован весь достижимый на ESP32-P4 потенциал OV02C10:
+
+- **1920×1080@30 (полные 2 MP)** — переключается в menuconfig
+  (Camera Sensors → OV02C10 → Default format select); предел чипа:
+  ISP принимает не более 1920 пикселей по ширине;
+- **тестовый шаблон** (4 типа цветных полос) для проверки тракта без оптики —
+  Example Configuration → Camera Sensor Test Pattern;
+- **управление частотой кадров** 30 → ниже (VBLANK/VTS) с расширением
+  максимальной экспозиции — Example Configuration → Camera Frame Rate Override;
+- **динамический вывод на LCD**: центрированный кроп 1:1 (по умолчанию)
+  или вписывание всего кадра с сохранением пропорций (letterbox).
+
+Полная карта возможностей (включая честный список недостижимого — 60 fps,
+HDR, binning — и объяснение причин):
+[docs/OV02C10_CAPABILITIES.md](docs/OV02C10_CAPABILITIES.md).
 
 ---
 
@@ -93,6 +113,7 @@ app_main: fps: ~30
 
 ## Документация
 
+- [docs/OV02C10_CAPABILITIES.md](docs/OV02C10_CAPABILITIES.md) — полная карта возможностей OV02C10: режимы, тестовый шаблон, управление fps, пределы чипа
 - [docs/CAMERA_DISPLAY.md](docs/CAMERA_DISPLAY.md) — полное описание пайплайна, пинов, init
 - [docs/FIXES_IDF603.md](docs/FIXES_IDF603.md) — полный документ фиксов: история миграции на IDF 6.0.3, разбор рантайм-фикса CSI
 - [docs/BUILD_IDF6.md](docs/BUILD_IDF6.md) — процедура сборки на IDF 6 (Linux/Windows)

@@ -162,6 +162,7 @@ typedef enum {
 #define ESP_CAM_SENSOR_AE_FLICKER                   ESP_CAM_SENSOR_CLASS_ID(ESP_CAM_SENSOR_CID_CLASS_3A, 0x19)  /*!< Anti banding flicker */
 #define ESP_CAM_SENSOR_GROUP_EXP_GAIN               ESP_CAM_SENSOR_CLASS_ID(ESP_CAM_SENSOR_CID_CLASS_3A, 0x1a)  /*!< Pack a group of (exposure and gain)registers to be effective at a specific time */
 #define ESP_CAM_SENSOR_EXPOSURE_US                  ESP_CAM_SENSOR_CLASS_ID(ESP_CAM_SENSOR_CID_CLASS_3A, 0x1b)  /*!< Exposure time in us(microseconds) */
+#define ESP_CAM_SENSOR_VBLANK                       ESP_CAM_SENSOR_CLASS_ID(ESP_CAM_SENSOR_CID_CLASS_3A, 0x1c)  /*!< Vertical blanking in lines: VTS = height + vblank. Larger vblank lowers frame rate and allows longer exposure */
 #define ESP_CAM_SENSOR_AUTO_N_PRESET_WB             ESP_CAM_SENSOR_CLASS_ID(ESP_CAM_SENSOR_CID_CLASS_3A, 0x20)  /*!< Pre set white balance mode when automatic white balance is not enabled */
 
 /**
