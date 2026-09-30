@@ -19,6 +19,7 @@
 #include "driver/ledc.h"
 #include "app_video.h"
 #include "app_lcd.h"
+#include "app_overlay.h"
 
 #define ALIGN_UP(num, align)    (((num) + ((align) - 1)) & ~((align) - 1))
 
@@ -103,9 +104,10 @@ static ppa_client_handle_t ppa_srm_handle = NULL;
 static size_t data_cache_line_size = 0;
 static void *lcd_buffer[EXAMPLE_LCD_BUF_NUM];
 
-#if CONFIG_EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE
-static int fps_count;
-static int64_t start_time;
+#if CONFIG_EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE || CONFIG_EXAMPLE_ENABLE_LCD_FPS_OVERLAY
+/* Frame rate measurement: counted over a sliding 500 ms window so the
+ * on-screen value and the log line both update twice per second. */
+static float s_measured_fps;
 #endif
 
 void app_main(void)
@@ -169,10 +171,6 @@ void app_main(void)
 
     // Start the camera stream task
     ESP_ERROR_CHECK(app_video_stream_task_start(video_cam_fd0, 0, NULL));
-
-#if CONFIG_EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE
-    start_time = esp_timer_get_time();  // Get the initial time for frame rate statistics
-#endif
 }
 
 static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index, uint32_t camera_buf_hes, uint32_t camera_buf_ves, size_t camera_buf_len, void *user_data)
@@ -233,15 +231,28 @@ static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf
                  (unsigned long)fit.out_off_x, (unsigned long)fit.out_off_y);
     }
 
-#if CONFIG_EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE
-    fps_count++;
-    if (fps_count == 50) {
-        int64_t end_time = esp_timer_get_time();
-        ESP_LOGI(TAG, "fps: %f", 1000000.0 / ((end_time - start_time) / 50.0));
-        start_time = end_time;
-        fps_count = 0;
+#if CONFIG_EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE || CONFIG_EXAMPLE_ENABLE_LCD_FPS_OVERLAY
+    {
+        static uint32_t frame_counter = 0;
+        static int64_t window_start_us = 0;
 
-        ESP_LOGI(TAG, "camera_buf_hes: %lu, camera_buf_ves: %lu, camera_buf_len: %d KB", camera_buf_hes, camera_buf_ves, camera_buf_len / 1024);
+        if (window_start_us == 0) {
+            window_start_us = esp_timer_get_time();
+        }
+        frame_counter++;
+
+        int64_t now_us = esp_timer_get_time();
+        int64_t elapsed_us = now_us - window_start_us;
+        if (elapsed_us >= 500000) {  /* update the readout every 500 ms */
+            s_measured_fps = (float)frame_counter * 1000000.0f / (float)elapsed_us;
+#if CONFIG_EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE
+            ESP_LOGI(TAG, "fps: %.2f, camera_buf_hes: %lu, camera_buf_ves: %lu, camera_buf_len: %d KB",
+                     s_measured_fps,
+                     (unsigned long)camera_buf_hes, (unsigned long)camera_buf_ves, camera_buf_len / 1024);
+#endif
+            frame_counter = 0;
+            window_start_us = now_us;
+        }
     }
 #endif
     // ESP_LOGI(TAG,"camera_vedio_frame_operation");
@@ -277,6 +288,15 @@ static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf
     };
 
     ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(ppa_srm_handle, &srm_config));
+
+#if CONFIG_EXAMPLE_ENABLE_LCD_FPS_OVERLAY
+    /* Draw the FPS readout on top of the camera image, then hand the
+     * buffer to the panel: draw_bitmap() performs the cache write-back
+     * for the full frame, so the overlay pixels get flushed too. */
+    app_overlay_draw_fps((uint16_t *)lcd_buffer[camera_buf_index],
+                         EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES,
+                         s_measured_fps);
+#endif
 
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(display_panel, 0, 0, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, lcd_buffer[camera_buf_index]));
 }

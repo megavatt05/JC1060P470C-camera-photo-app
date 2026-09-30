@@ -13,8 +13,14 @@
 
 #elif CONFIG_BOARD_TYPE_JC1060P470
 
+/* JD9165 panel: 7" IPS 1024x600 (docs/CAMERA_DISPLAY.md).
+ * MUST match video_timing.v_size in app_lcd.c: the DPI driver allocates
+ * each frame buffer as timing.h_size x timing.v_size x bpp. A larger value
+ * here makes the PPA write past the end of every frame buffer (with 608 it
+ * overran the buffer by 17,408 bytes every frame -> heap corruption,
+ * esp_vfs_ioctl crash and a flickering band at the top of the screen). */
 #define EXAMPLE_LCD_H_RES                   (1024)
-#define EXAMPLE_LCD_V_RES                   (608)
+#define EXAMPLE_LCD_V_RES                   (600)
 
 #elif CONFIG_BOARD_TYPE_JC4880P443
 

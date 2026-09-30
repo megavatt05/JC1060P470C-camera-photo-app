@@ -55,23 +55,20 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 # CONFIG_PM_ENABLE is not set
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
 
-# --- Диагностика: расследование Load access fault в кадровой цепочке ---
-# Краш происходит в esp_vfs_ioctl (чтение vfs->vfs->ioctl по мусорному
-# указателю) при VIDIOC_QBUF из video_stream_task. vfs_entry_t и копия
-# fs_ops аллоцируются с MALLOC_CAP_DEFAULT и при 32MB PSRAM в пуле могут
-# попасть в PSRAM, где их способно затоптать DMA/переполнение буфера.
+# --- Диагностика/защита (обновлено после находки первопричины) ---
+# Первопричина краша esp_vfs_ioctl и мерцания экрана найдена и устранена в коде:
+# EXAMPLE_LCD_V_RES был 608 при реальном фреймбуфере 1024x600 -> PPA писал
+# 17 КБ за каждый кадр мимо конца буфера (порча кучи PSRAM). Ниже - оставленная
+# защита от подобных проблем.
 #
-# 1) Подробное логирование: per-frame размер принятого кадра
-#    (csi_video: size=NNN), путь DQBUF/QBUF, ISP/AE активность.
-#    В IDF 6 уровни — choice-символы, поэтому именно так:
-CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
-CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+# Уровень логов: INFO по умолчанию (DEBUG захламляет лог сотнями строк
+# MSPI DQS/MSPI Timing при каждом старте), DEBUG доступен через menuconfig:
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 #
-# 2) Структуры VFS (то, что затирается при краше) принудительно во
-#    внутреннюю RAM: если краш исчезнет - источник порчи памяти в PSRAM.
+# Структуры VFS принудительно во внутренней RAM (защита от порчи в PSRAM):
 CONFIG_VFS_SELECT_IN_RAM=y
 #
-# 3) Полное «отравление» кучи: canary вокруг каждого блока, abort с
-#    адресом при первой же попытке malloc/free затёртого блока - ловит
-#    источник порчи с поличным.
+# Полное «отравление» кучи: canary вокруг каждого блока, abort с адресом
+# при попытке malloc/free затёртого блока — индикатор остаточной порчи:
 CONFIG_HEAP_POISONING_COMPREHENSIVE=y

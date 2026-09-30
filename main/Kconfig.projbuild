@@ -44,6 +44,16 @@ menu "Example Configuration"
         bool "enable print fps rate value"
         default y
 
+    config EXAMPLE_ENABLE_LCD_FPS_OVERLAY
+        bool "Show FPS readout on the LCD (RGB565 only)"
+        default y
+        depends on LCD_PIXEL_FORMAT_RGB565
+        help
+            Draw a "FPS: 30.1" counter in the top-left corner of the live
+            camera image. The value is recalculated every 500 ms and drawn
+            into the frame buffer after the PPA blit, before the buffer is
+            sent to the DSI panel.
+
     config EXAMPLE_USE_MEMORY_MAPPING
         bool "Use Memory Mapping for Buffer Allocation"
         default n
