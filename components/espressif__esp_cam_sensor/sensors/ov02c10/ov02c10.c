@@ -1163,6 +1163,43 @@ static esp_err_t ov02c10_set_test_pattern(esp_cam_sensor_device_t *dev, int patt
      return ret;
  }
  
+ /* Diagnostic register dump: used when a device ACKs on the SCCB bus but its
+  * ID register reads back unexpectedly (typically 0x0000). Reading a window of
+  * the register file tells apart a dead digital core (every byte reads 0x00,
+  * i.e. power/clock/FPC problem) from a partially alive device. Read-only,
+  * therefore safe to run against any device that ACKs. */
+ static void ov02c10_dump_diag_regs(esp_cam_sensor_device_t *dev)
+ {
+     static const uint16_t diag_regs[] = {
+         0x0100, 0x0103, 0x0104,
+         0x3000, 0x3001, 0x3002, 0x3003, 0x3004, 0x3005,
+         0x300a, 0x300b, 0x300c, 0x300d, 0x300e, 0x300f,
+         0x3010, 0x3011, 0x3018,
+     };
+     char line[160];
+     int off = 0;
+     int nonzero = 0;
+ 
+     line[0] = '\0';
+     for (size_t i = 0; i < sizeof(diag_regs) / sizeof(diag_regs[0]) && off < (int)sizeof(line) - 8; i++) {
+         uint8_t val = 0;
+         if (ov02c10_read(dev->sccb_handle, diag_regs[i], &val) == ESP_OK) {
+             off += snprintf(line + off, sizeof(line) - off, "%04x=%02x ", diag_regs[i], val);
+             if (val) {
+                 nonzero++;
+             }
+         } else {
+             off += snprintf(line + off, sizeof(line) - off, "%04x=-- ", diag_regs[i]);
+         }
+     }
+     ESP_LOGW(TAG, "diag register dump: %s", line);
+     if (nonzero == 0) {
+         ESP_LOGE(TAG, "all diagnostic registers read 0x00: the digital core behind this address is not running - check power rails (AVDD/DVDD/DOVDD), XVCLK and FPC seating");
+     } else {
+         ESP_LOGW(TAG, "%d diagnostic register(s) non-zero: core partially alive; verify this address really belongs to the OV02C10", nonzero);
+     }
+ }
+ 
  static esp_err_t ov02c10_set_stream(esp_cam_sensor_device_t *dev, int enable)
  {
      esp_err_t ret;
@@ -1952,10 +1989,14 @@ static esp_err_t ov02c10_set_para_value(esp_cam_sensor_device_t *dev, uint32_t i
      * the ID read a few times before giving up. */
     {
         int attempt;
+        bool id_reads_ok = false;
         for (attempt = 0; attempt < 3; attempt++) {
             esp_err_t id_ret = ov02c10_get_sensor_id(dev, &dev->id);
-            if (id_ret == ESP_OK && dev->id.pid == OV02C10_PID) {
-                break;
+            if (id_ret == ESP_OK) {
+                id_reads_ok = true;
+                if (dev->id.pid == OV02C10_PID) {
+                    break;
+                }
             }
             if (attempt == 0) {
                 if (id_ret != ESP_OK) {
@@ -1967,11 +2008,29 @@ static esp_err_t ov02c10_set_para_value(esp_cam_sensor_device_t *dev, uint32_t i
             }
             delay_ms(25);
         }
+
+        /* Deep differential diagnosis for the "ACKs but ID=0x0000" case:
+         * try a software reset and re-read the ID. Only touch the device when
+         * register reads actually work - a device whose register reads fail
+         * may be some other chip on the shared bus and blind writes to it are
+         * not safe. */
+        if (dev->id.pid != OV02C10_PID && dev->id.pid == 0 && id_reads_ok) {
+            ESP_LOGW(TAG, "ID reads 0x0000 while register reads work: issuing sensor SW reset (reg 0x0103) and re-probing");
+            if (ov02c10_soft_reset(dev) == ESP_OK) {
+                delay_ms(15);
+                if (ov02c10_get_sensor_id(dev, &dev->id) == ESP_OK && dev->id.pid == OV02C10_PID) {
+                    ESP_LOGW(TAG, "sensor recovered after SW reset - unstable power-on state");
+                }
+            } else {
+                ESP_LOGE(TAG, "register write failed on ACKing device: SCCB write path is broken");
+            }
+        }
     }
     if (dev->id.pid != OV02C10_PID) {
         ESP_LOGE(TAG, "Camera sensor is not OV02C10, PID=0x%x", dev->id.pid);
         if (dev->id.pid == 0) {
             ESP_LOGE(TAG, "the device ACKs on SCCB but reads ID=0x0000: likely a power/clock problem, check module rails (DOVDD/AVDD), 24 MHz clock and FPC seating");
+            ov02c10_dump_diag_regs(dev);
         }
         goto err_free_handler;
     }
