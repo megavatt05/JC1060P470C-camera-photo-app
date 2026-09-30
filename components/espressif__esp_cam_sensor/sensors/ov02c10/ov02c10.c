@@ -952,7 +952,12 @@ static const ov02c10_gain_t ov02c10_gain_map[] = {
 };
 #endif
  
- static const esp_cam_sensor_isp_info_t ov02c10_isp_info[] = {
+/* NOTE: deliberately NOT const. The VBLANK control mutates isp_v1_info.vts
+ * at runtime (ov02c10_set_vblank / ov02c10_set_format restore). A const
+ * array would be placed into read-only flash (.rodata) and the store would
+ * trigger a "Store access fault" Guru Meditation on ESP32-P4.
+ * Cost: 3 * sizeof(esp_cam_sensor_isp_info_t) bytes of internal RAM. */
+static esp_cam_sensor_isp_info_t ov02c10_isp_info[] = {
      {
          .isp_v1_info = {
              .version = SENSOR_ISP_INFO_VERSION_DEFAULT,
@@ -1303,9 +1308,10 @@ static const uint32_t ov02c10_isp_info_vts_default[] = {
  * The cached isp_info vts is updated as well so exposure unit conversions
  * (EXPOSURE_V4L2_TO_OV02C10 etc.) and the AE loop stay consistent.
  *
- * Note: ov02c10_isp_info[] is statically shared; this driver manages a
- * single camera instance, so the runtime mutation is safe. A mode switch
- * (ov02c10_set_format) restores the default VTS from the table above.
+ * Note: ov02c10_isp_info[] is statically shared and NOT const (see its
+ * definition); this driver manages a single camera instance, so the runtime
+ * mutation is safe. A mode switch (ov02c10_set_format) restores the default
+ * VTS from the table above.
  */
 static esp_err_t ov02c10_set_vblank(esp_cam_sensor_device_t *dev, uint32_t vblank)
 {
