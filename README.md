@@ -50,20 +50,31 @@ esp_video:
 
 ---
 
-## Сборка
+## Сборка (IDF 6.0.3) — без патчей и скриптов
+
+Компоненты, требующие адаптации под IDF 6 (esp_video, esp_ipa, esp_lcd_jd9365),
+**уже включены в репозиторий в каталоге `components/`** в пропатченном виде —
+как и esp_cam_sensor с OV02C10. Ничего патчить не нужно: просто клонируйте и собирайте.
 
 ```bash
-git clone https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
+git clone -b idf603-build-fixes https://github.com/megavatt05/JC1060P470C-camera-photo-app.git
 cd JC1060P470C-camera-photo-app
 
-# IDF 6.0.3
-. $HOME/esp/esp-idf/export.sh   # путь к вашему IDF 6.0.3
+. $HOME/esp/esp-idf/export.sh   # ваше окружение IDF 6.0.3 (Windows: export.ps1)
 
-rm -f sdkconfig
 idf.py set-target esp32p4
 idf.py build
 idf.py -p COMx flash monitor
 ```
+
+> Если вы обновляете уже существующий клон (`git pull`) — обязательно выполните
+> `idf.py set-target esp32p4` после pull (или `rm -rf build managed_components sdkconfig`
+> перед сборкой), чтобы проект переключился на компоненты из `components/`.
+>
+> Для IDF 5.5.5 используйте исходный рабочий репозиторий:
+> https://github.com/megavatt05/ESP32P4-JC1060P470C-I_W_Y/tree/example/camera-photo-app
+>
+> Подробности и история адаптации: [docs/BUILD_IDF6.md](docs/BUILD_IDF6.md).
 
 Ожидаемый лог:
 
@@ -101,8 +112,11 @@ https://github.com/megavatt05/ESP32P4-JC1060P470C-I_W_Y/tree/example/camera-phot
 │   ├── app_video.c / .h
 │   ├── idf_component.yml
 │   └── CMakeLists.txt
-├── components/
-│   └── espressif__esp_cam_sensor/   # OV02C10
+├── components/                        # локальные компоненты (переопределяют registry)
+│   ├── espressif__esp_cam_sensor/     # v1.2.1 + драйвер OV02C10
+│   ├── espressif__esp_video/          # v1.2.0, адаптирована под IDF 6
+│   ├── espressif__esp_ipa/            # v1.1.0, адаптирована под IDF 6
+│   └── espressif__esp_lcd_jd9365/     # v1.0.4, адаптирована под IDF 6
 └── docs/
     └── CAMERA_DISPLAY.md
 ```

@@ -1,7 +1,7 @@
 # ESP-IDF 5.5.x / 6.0.x — JC1060P470C_I_W_Y camera photo app
 # Board: ESP32-P4 rev v1.3 + OV02C10 + JD9165 1024x600
 # Recommended: ESP-IDF 5.5.5 (proven ~30 fps).
-# IDF 6.0.3: local cam_sensor 1.2.1 + tools/patch_esp_ipa_idf6.ps1
+# IDF 6.0.3: components/ содержит cam_sensor 1.2.1 + адаптированные esp_video/esp_ipa/esp_lcd_jd9365
 #
 CONFIG_IDF_TARGET="esp32p4"
 
@@ -12,6 +12,9 @@ CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# На платах JC1060P470C стоит flash-чип Boya (видно в boot-логе:
+# "Detected boya flash chip but using generic driver") — включаем родной драйвер
+CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP=y
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
