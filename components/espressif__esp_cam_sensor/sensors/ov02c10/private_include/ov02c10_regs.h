@@ -26,6 +26,7 @@ extern "C" {
 #define OV02C10_REG_END              0xffff
 #define OV02C10_REG_SENSOR_ID_H      0x300a
 #define OV02C10_REG_SENSOR_ID_L      0x300b
+#define OV02C10_REG_SENSOR_REV       0x300c   /* sub-revision byte: IPU3-era modules 0x5602, IPU6-era (laptops) 0x560243 */
 #define OV02C10_REG_SLEEP_MODE       0x0100
 #define OV02C10_REG_MIPI_CTRL00      0x4800
 #define OV02C10_REG_FRAME_OFF_NUMBER 0x4202

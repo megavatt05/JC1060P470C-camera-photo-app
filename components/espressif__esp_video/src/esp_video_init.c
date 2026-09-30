@@ -290,6 +290,124 @@ static bool sensor_is_detected(esp_cam_sensor_detect_fn_t *p, esp_cam_sensor_dev
 {
     return true;
 }
+
+#if CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
+/**
+ * @brief Scan the camera sensor I2C (SCCB) bus and collect the addresses of
+ *        all responding devices. Used as a fallback when the sensor could not
+ *        be detected at the driver-registered address.
+ *
+ * @param mark SCCB initialization mark array
+ * @param sccb_cfg SCCB configuration (I2C port, pins, external bus handle)
+ * @param addrs output array for the found 7-bit addresses
+ * @param max capacity of addrs
+ *
+ * @return number of addresses written into addrs
+ */
+static int sccb_scan_bus(esp_video_init_sccb_mark_t *mark, const esp_video_init_sccb_config_t *sccb_cfg,
+                          uint8_t *addrs, int max)
+{
+    i2c_master_bus_handle_t bus = NULL;
+    int i2c_port = sccb_cfg->i2c_config.port;
+    int count = 0;
+
+    if (sccb_cfg->init_sccb) {
+        if (i2c_port >= 0 && i2c_port < SCCB_NUM_MAX) {
+            bus = mark[i2c_port].handle;
+        }
+    } else {
+        bus = sccb_cfg->i2c_handle;
+    }
+    if (!bus) {
+        return 0;
+    }
+
+    ESP_LOGI(TAG, "scanning I2C bus for camera sensor devices (SCL=%d SDA=%d)",
+             sccb_cfg->i2c_config.scl_pin, sccb_cfg->i2c_config.sda_pin);
+    for (uint16_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(bus, addr, 20) == ESP_OK) {
+            ESP_LOGI(TAG, "I2C device ACK at address 0x%02x", addr);
+            if (count < max) {
+                addrs[count++] = (uint8_t)addr;
+            }
+        }
+    }
+    if (count == 0) {
+        ESP_LOGW(TAG, "no I2C device answered the bus scan: check the camera module power rails, clock and FPC seating");
+    }
+    return count;
+}
+
+/**
+ * @brief Run the sensor detect function at an explicitly given SCCB address
+ *
+ * @param mark SCCB initialization mark array
+ * @param csi_cfg CSI configuration (SCCB, reset and power-down pins)
+ * @param p registered sensor detect function entry
+ * @param sccb_addr 7-bit SCCB address to detect at
+ *
+ * @return camera device handle on success, NULL otherwise
+ */
+static esp_cam_sensor_device_t *csi_detect_at_addr(esp_video_init_sccb_mark_t *mark,
+                                                   const esp_video_init_csi_config_t *csi_cfg,
+                                                   esp_cam_sensor_detect_fn_t *p,
+                                                   uint16_t sccb_addr)
+{
+    esp_cam_sensor_config_t cfg = {0};
+    esp_cam_sensor_device_t *cam_dev;
+
+    cfg.sccb_handle = create_sccb_device(mark, ESP_VIDEO_INIT_CSI_SCCB, &csi_cfg->sccb_config, sccb_addr);
+    if (!cfg.sccb_handle) {
+        return NULL;
+    }
+
+    cfg.reset_pin = csi_cfg->reset_pin,
+    cfg.pwdn_pin = csi_cfg->pwdn_pin,
+    cfg.xclk_pin = -1,
+    cfg.sensor_port = p->port,
+    cam_dev = (*(p->detect))((void *)&cfg);
+    if (!cam_dev) {
+        destroy_sccb_device(cfg.sccb_handle, mark, &csi_cfg->sccb_config);
+        return NULL;
+    }
+    return cam_dev;
+}
+
+/**
+ * @brief Dynamic SCCB address re-detection: scan the I2C bus and retry the
+ *        sensor detection at every address where a device ACKs. A sensor
+ *        module strapped to a different SCCB address (e.g. a laptop OV02C10
+ *        module wired with the other SID strap) gets found and used
+ *        automatically. Chip-ID validation still happens inside each
+ *        driver's detect function, so foreign I2C devices are skipped safely.
+ *
+ * @param mark SCCB initialization mark array
+ * @param csi_cfg CSI configuration
+ * @param p registered sensor detect function entry that just failed
+ *
+ * @return camera device handle on success, NULL otherwise
+ */
+static esp_cam_sensor_device_t *csi_detect_at_scanned_addrs(esp_video_init_sccb_mark_t *mark,
+                                                            const esp_video_init_csi_config_t *csi_cfg,
+                                                            esp_cam_sensor_detect_fn_t *p)
+{
+    uint8_t addrs[16];
+    int count = sccb_scan_bus(mark, &csi_cfg->sccb_config, addrs, sizeof(addrs) / sizeof(addrs[0]));
+
+    for (int i = 0; i < count; i++) {
+        if (addrs[i] == p->sccb_addr) {
+            continue; /* already tried before the scan */
+        }
+        ESP_LOGI(TAG, "retrying MIPI-CSI camera sensor detection at SCCB address 0x%02x", addrs[i]);
+        esp_cam_sensor_device_t *cam_dev = csi_detect_at_addr(mark, csi_cfg, p, addrs[i]);
+        if (cam_dev) {
+            ESP_LOGI(TAG, "MIPI-CSI camera sensor detected at dynamic SCCB address 0x%02x", addrs[i]);
+            return cam_dev;
+        }
+    }
+    return NULL;
+}
+#endif /* CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE */
 #endif
 
 /**
@@ -378,7 +496,7 @@ esp_err_t esp_video_init(const esp_video_init_config_t *config)
     for (esp_cam_sensor_detect_fn_t *p = &__esp_cam_sensor_detect_fn_array_start; p < &__esp_cam_sensor_detect_fn_array_end; ++p) {
 #if CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
         if (!csi_inited && p->port == ESP_CAM_SENSOR_MIPI_CSI && config->csi != NULL) {
-            esp_cam_sensor_config_t cfg;
+            esp_cam_sensor_config_t cfg = {0};
             esp_cam_sensor_device_t *cam_dev;
 
             cfg.sccb_handle = create_sccb_device(sccb_mark, ESP_VIDEO_INIT_CSI_SCCB, &config->csi->sccb_config, p->sccb_addr);
@@ -388,11 +506,19 @@ esp_err_t esp_video_init(const esp_video_init_config_t *config)
 
             cfg.reset_pin = config->csi->reset_pin,
             cfg.pwdn_pin = config->csi->pwdn_pin,
+            cfg.xclk_pin = -1,
             cam_dev = (*(p->detect))((void *)&cfg);
             if (!cam_dev) {
-                destroy_sccb_device(cfg.sccb_handle, sccb_mark, &config->csi->sccb_config);
                 ESP_LOGE(TAG, "failed to detect MIPI-CSI camera sensor with address=%x", p->sccb_addr);
-                continue;
+                /* Dynamic SCCB address re-detection: scan the I2C bus and
+                 * retry at every address where a device ACKs, so that a
+                 * sensor module with a different SCCB address is still
+                 * found and the address is switched automatically. */
+                cam_dev = csi_detect_at_scanned_addrs(sccb_mark, config->csi, p);
+                destroy_sccb_device(cfg.sccb_handle, sccb_mark, &config->csi->sccb_config);
+                if (!cam_dev) {
+                    continue;
+                }
             }
 
             ret = esp_video_create_csi_video_device(cam_dev);

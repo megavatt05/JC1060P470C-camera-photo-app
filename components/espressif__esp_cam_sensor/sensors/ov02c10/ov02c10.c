@@ -1292,7 +1292,9 @@ static const uint32_t ov02c10_isp_info_vts_default[] = {
     2328, /* MIPI_2lane_24Minput_RAW10_1920x1080_30fps */
 };
 
-#define OV02C10_VTS_MAX 0xffff /* VTS registers 0x380e/0x380f are 16-bit */
+/* 16-bit limit of the VTS registers 0x380e/0x380f (named differently from the
+ * legacy unused OV02C10_VTS_MAX above to avoid a redefinition warning). */
+#define OV02C10_VTS_REG_MAX 0xffff
 
 /*
  * Vertical blanking (frame rate) control, following the Linux kernel driver
@@ -1337,8 +1339,8 @@ static esp_err_t ov02c10_set_vblank(esp_cam_sensor_device_t *dev, uint32_t vblan
         ESP_LOGE(TAG, "vblank %" PRIu32 " is too small, VTS must be >= %" PRIu32, vblank, vts_min);
         return ESP_ERR_INVALID_ARG;
     }
-    if (vts > OV02C10_VTS_MAX) {
-        ESP_LOGE(TAG, "vblank %" PRIu32 " is too large, VTS must be <= %d", vblank, OV02C10_VTS_MAX);
+    if (vts > OV02C10_VTS_REG_MAX) {
+        ESP_LOGE(TAG, "vblank %" PRIu32 " is too large, VTS must be <= %d", vblank, OV02C10_VTS_REG_MAX);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -1385,7 +1387,7 @@ static esp_err_t ov02c10_query_para_desc(esp_cam_sensor_device_t *dev, esp_cam_s
         break;
     case ESP_CAM_SENSOR_VBLANK: {
         int i;
-        uint32_t vts_min = OV02C10_VTS_MAX;
+        uint32_t vts_min = OV02C10_VTS_REG_MAX;
         for (i = 0; i < ARRAY_SIZE(ov02c10_isp_info); i++) {
             if (dev->cur_format->isp_info == &ov02c10_isp_info[i]) {
                 vts_min = ov02c10_isp_info_vts_default[i];
@@ -1395,7 +1397,7 @@ static esp_err_t ov02c10_query_para_desc(esp_cam_sensor_device_t *dev, esp_cam_s
         qdesc->type = ESP_CAM_SENSOR_PARAM_TYPE_NUMBER;
         /* minimum keeps the mode default frame rate, maximum follows the 16-bit VTS register */
         qdesc->number.minimum = vts_min - dev->cur_format->height;
-        qdesc->number.maximum = OV02C10_VTS_MAX - dev->cur_format->height;
+        qdesc->number.maximum = OV02C10_VTS_REG_MAX - dev->cur_format->height;
         qdesc->number.step = 1;
         qdesc->default_value = qdesc->number.minimum;
         break;
@@ -1945,14 +1947,47 @@ static esp_err_t ov02c10_set_para_value(esp_cam_sensor_device_t *dev, uint32_t i
         goto err_free_handler;
     }
 
-    if (ov02c10_get_sensor_id(dev, &dev->id) != ESP_OK) {
-        ESP_LOGE(TAG, "Get sensor ID failed");
-        goto err_free_handler;
-    } else if (dev->id.pid != OV02C10_PID) {
+    /* The sensor may need some time after power-up before its SCCB interface
+     * answers correctly (slow rail ramp-up, module power sequencing), so retry
+     * the ID read a few times before giving up. */
+    {
+        int attempt;
+        for (attempt = 0; attempt < 3; attempt++) {
+            esp_err_t id_ret = ov02c10_get_sensor_id(dev, &dev->id);
+            if (id_ret == ESP_OK && dev->id.pid == OV02C10_PID) {
+                break;
+            }
+            if (attempt == 0) {
+                if (id_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "sensor ID read failed (err 0x%x), retrying", id_ret);
+                } else {
+                    ESP_LOGW(TAG, "sensor ACKs but PID=0x%04x (expected 0x%04x), retrying",
+                             dev->id.pid, OV02C10_PID);
+                }
+            }
+            delay_ms(25);
+        }
+    }
+    if (dev->id.pid != OV02C10_PID) {
         ESP_LOGE(TAG, "Camera sensor is not OV02C10, PID=0x%x", dev->id.pid);
+        if (dev->id.pid == 0) {
+            ESP_LOGE(TAG, "the device ACKs on SCCB but reads ID=0x0000: likely a power/clock problem, check module rails (DOVDD/AVDD), 24 MHz clock and FPC seating");
+        }
         goto err_free_handler;
     }
-    ESP_LOGI(TAG, "Detected Camera sensor PID=0x%x", dev->id.pid);
+    /* Sub-revision register 0x300c: laptop modules built for Intel IPU6
+     * platforms report the full chip ID 0x560243 (see intel/ipu6-drivers),
+     * while IPU3-era modules and the JC1060P470C module report 0x5602.
+     * The 2-byte PID check above accepts both. Log the revision for info. */
+    {
+        uint8_t rev = 0;
+        if (ov02c10_read(dev->sccb_handle, OV02C10_REG_SENSOR_REV, &rev) == ESP_OK) {
+            ESP_LOGI(TAG, "Detected Camera sensor PID=0x%x, sub-revision 0x%02x (full chip ID 0x%x%02x)",
+                     dev->id.pid, rev, dev->id.pid, rev);
+        } else {
+            ESP_LOGI(TAG, "Detected Camera sensor PID=0x%x", dev->id.pid);
+        }
+    }
 
     return dev;
 
