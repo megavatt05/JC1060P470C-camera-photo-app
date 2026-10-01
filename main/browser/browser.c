@@ -418,7 +418,7 @@ static void draw_results(uint16_t *fb)
         }
         int y = CONTENT_Y0 + i * ROW_H;
 
-        char num[8];
+        char num[16]; /* >= 13: worst-case "%2d." is 11 (int) + '.' + NUL — GCC format-truncation */
         snprintf(num, sizeof(num), "%2d.", idx + 1);
         ui_text(fb, LCD_W, LCD_H, 8, y + 8, num, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
 
