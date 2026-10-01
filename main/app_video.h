@@ -7,6 +7,8 @@
 #define APP_VIDEO_H
 
 #include "esp_err.h"
+#include "sdkconfig.h"
+#include "driver/i2c_master.h"   /* i2c_master_bus_handle_t (self-contained) */
 #include "linux/videodev2.h"
 #include "esp_video_device.h"
 

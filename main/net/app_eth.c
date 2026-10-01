@@ -14,6 +14,13 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_eth.h"
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+/* IDF v6: SPI Ethernet chip drivers were moved out of esp_eth into
+ * separate managed components (here: espressif/w5500, see main/idf_component.yml). */
+#include "esp_eth_mac_w5500.h"
+#include "esp_eth_phy_w5500.h"
+#endif
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "driver/spi_master.h"
@@ -124,6 +131,27 @@ esp_err_t app_eth_start(void)
         return err;
     }
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+    /* IDF v6 (espressif/w5500 v2): the driver owns the SPI device and calls
+     * spi_bus_add_device() itself from esp_eth_mac_new_w5500(); we only bring
+     * up the bus. The device config is kept by pointer -> must be static. */
+    static spi_device_interface_config_t w5500_devcfg = {
+        .mode = 0,
+        .clock_speed_hz = CONFIG_EB_W5500_SPI_CLOCK_MHZ * 1000 * 1000,
+        .spics_io_num = CONFIG_EB_W5500_CS,
+        .queue_size = 20,
+    };
+
+    /* W5500 MAC + internal PHY of the module */
+    eth_w5500_config_t w5500 = ETH_W5500_DEFAULT_CONFIG(
+            (spi_host_device_t)CONFIG_EB_W5500_SPI_HOST, &w5500_devcfg);
+    w5500.base.int_gpio_num = CONFIG_EB_W5500_INT;
+#if CONFIG_EB_W5500_INT < 0
+    w5500.base.poll_period_ms = 20;     /* polling instead of the INT line */
+#endif
+#else
+    /* IDF 5.x: W5500 is still part of the esp_eth component; the app adds
+     * the SPI device itself. */
     spi_device_interface_config_t dev_cfg = {
         .mode = 0,
         .clock_speed_hz = CONFIG_EB_W5500_SPI_CLOCK_MHZ * 1000 * 1000,
@@ -135,12 +163,12 @@ esp_err_t app_eth_start(void)
         return ESP_FAIL;
     }
 
-    /* W5500 MAC + internal PHY of the module */
     eth_w5500_config_t w5500 = ETH_W5500_DEFAULT_CONFIG(s_eth.spi);
     w5500.int_gpio_num = CONFIG_EB_W5500_INT;
 #if CONFIG_EB_W5500_INT < 0
     w5500.poll_period_ms = 20;      /* polling instead of the INT line */
 #endif
+#endif /* ESP_IDF_VERSION >= 6.0 */
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();

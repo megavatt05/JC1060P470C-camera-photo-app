@@ -6,6 +6,12 @@
 #ifndef APP_LCD_H
 #define APP_LCD_H
 
+/* Self-contained header: touch.c / browser.c include it before any esp_lcd
+ * header, so the panel handle type must be pulled in here. */
+#include "esp_err.h"
+#include "esp_lcd_types.h"
+#include "sdkconfig.h"
+
 #if CONFIG_BOARD_TYPE_JC8012P4A1
 
 #define EXAMPLE_LCD_H_RES                   (800)

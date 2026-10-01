@@ -8,6 +8,13 @@ dependencies:
   espressif/usb:
     version: "*"
 
+  # IDF v6 moved SPI Ethernet chip drivers out of esp_eth into the registry;
+  # on IDF 5.x the W5500 driver is still part of esp_eth itself.
+  espressif/w5500:
+    version: "^2.0.0"
+    rules:
+      - if: "idf_version >=6.0"
+
   espressif/esp_lcd_ek79007:
     version: 1.*
     public: true
