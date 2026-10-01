@@ -1,83 +1,15 @@
 menu "Example Configuration"
 
-    config EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR
-        bool "Enable MIPI CSI Camera Sensor"
-        default y
-        depends on SOC_MIPI_CSI_SUPPORTED
-
-    if EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_PORT
-            int "MIPI CSI SCCB I2C Port Number"
-            default 0
-            range 0 1
-
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_SCL_PIN
-            int "MIPI CSI SCCB I2C SCL Pin"
-            default 34
-            range -1 56
-
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_SDA_PIN
-            int "MIPI CSI SCCB I2C SDA Pin"
-            default 31
-            range -1 56
-
-        config EXAMPLE_MIPI_CSI_SCCB_I2C_FREQ
-            int "MIPI CSI SCCB I2C Frequency"
-            default 100000
-            range 100000 400000
-            help
-                Increasing this value can reduce the initialization time of the camera sensor.
-                Please refer to the relevant instructions of the camera sensor to adjust the value.
-
-        config EXAMPLE_MIPI_CSI_CAM_SENSOR_RESET_PIN
-            int "MIPI CSI Camera Sensor Reset Pin"
-            default -1
-            range -1 56
-
-        config EXAMPLE_MIPI_CSI_CAM_SENSOR_PWDN_PIN
-            int "MIPI CSI Camera Sensor Power Down Pin"
-            default -1
-            range -1 56
-    endif
-
-    config EXAMPLE_ENABLE_PRINT_FPS_RATE_VALUE
-        bool "enable print fps rate value"
-        default y
-
     config EXAMPLE_QUIET_LOGS
         bool "Quiet logs (force INFO level at boot)"
         default y
         help
             Force the runtime log level to INFO at the very start of app_main,
             regardless of what CONFIG_LOG_DEFAULT_LEVEL ended up in a stale
-            sdkconfig. Per-frame ISP DEBUG statistics (~1 KB per frame)
-            saturate the 115200 baud console and throttle the whole video
-            pipeline down to 5-10 fps. sdkconfig.defaults alone is not
-            enough: it is only applied when sdkconfig is regenerated.
+            sdkconfig. Excessive per-event DEBUG logging saturates the 115200
+            baud console and slows everything down. sdkconfig.defaults alone is
+            not enough: it is only applied when sdkconfig is regenerated.
             Disable only for deep diagnostics with a fast console.
-
-    config EXAMPLE_ENABLE_LCD_FPS_OVERLAY
-        bool "Show FPS readout on the LCD (RGB565 only)"
-        default y
-        depends on LCD_PIXEL_FORMAT_RGB565
-        help
-            Draw a "FPS: 30.1" counter in the top-left corner of the live
-            camera image. The value is recalculated every 500 ms and drawn
-            into the frame buffer after the PPA blit, before the buffer is
-            sent to the DSI panel.
-
-    config EXAMPLE_USE_MEMORY_MAPPING
-        bool "Use Memory Mapping for Buffer Allocation"
-        default n
-        help
-        Enable this option if you want to allocate memory using memory mapping.
-        This is typically useful for performance optimization or when working
-        with hardware that requires mapped memory access
-
-    config EXAMPLE_CAM_BUF_COUNT
-        int "Camera Buffer Count"
-        default 2
-        range 2 3
 
     choice
         prompt "Choose the color format of the LCD"
@@ -89,171 +21,95 @@ menu "Example Configuration"
                 bool "RGB888"
     endchoice
 
-    config EXAMPLE_ENABLE_CAM_SENSOR_PIC_VFLIP
-        bool "Enable Camera Sensor Picture Vertical Flip"
-        default n
-        help
-            Select this option, enable camera sensor picture vertical flip.
-
-    config EXAMPLE_ENABLE_CAM_SENSOR_PIC_HFLIP
-        bool "Enable Camera Sensor Picture Horizontal Flip"
-        default n
-        help
-            Select this option, enable camera sensor picture horizontal flip.
-
-    config EXAMPLE_CAM_TEST_PATTERN
-        int "Camera Sensor Test Pattern (0=off, 1..4)"
-        default 0
-        range 0 4
-        help
-            Overlay a sensor-generated test pattern instead of the live image.
-            Useful to verify the whole camera pipeline (MIPI-CSI, ISP, PPA, LCD)
-            without optics. Types follow the Linux kernel ov02c10 driver:
-              0 - disabled (live image)
-              1 - Color Bar
-              2 - Top-Bottom Darker Color Bar
-              3 - Right-Left Darker Color Bar
-              4 - Color Bar type 4
-            The pattern is applied right after the video device is opened,
-            before the stream starts.
-
-    config EXAMPLE_CAM_TARGET_FPS
-        int "Camera Frame Rate Override in fps (0=sensor mode default)"
-        default 0
-        range 0 30
-        help
-            Lower the camera frame rate below the sensor mode default (30 fps)
-            by increasing the vertical blanking (VTS registers 0x380e/0x380f).
-            Useful to allow longer maximum exposure in low light: the AE loop
-            can then integrate more light per frame. 0 keeps the sensor mode
-            default. The value cannot exceed the mode default because the MIPI
-            timing is dimensioned for it. Approximate result:
-            fps = pclk / (hts * vts).
-
-    choice EXAMPLE_CAM_DISPLAY_FIT
-        prompt "Camera to LCD display fit mode"
-        default EXAMPLE_CAM_DISPLAY_FIT_CROP
-        help
-            How the camera frame is mapped onto the 1024x600 LCD by the PPA.
-
-        config EXAMPLE_CAM_DISPLAY_FIT_CROP
-            bool "Crop center, 1:1 pixels"
-            help
-                Take a centered LCD-sized block from the camera frame without
-                scaling. Sharpest possible image; part of the frame outside
-                the LCD aspect ratio is not shown.
-
-        config EXAMPLE_CAM_DISPLAY_FIT_SCALE
-            bool "Scale to fit (letterbox)"
-            help
-                Scale the whole camera frame down to fit inside the LCD,
-                preserving the aspect ratio. Black bars are added where needed.
-                PPA scaling granularity is 1/16, e.g. 1920x1080 -> 960x540.
-    endchoice
-
 endmenu
 
-menu "Ethernet Browser (CamBrowser)"
+menu "CamBrowser (Ethernet Browser on LCD)"
 
-    config APP_ENABLE_ETHERNET_BROWSER
-        bool "Enable CamBrowser (Ethernet + web browser on LCD)"
-        default y
+    config EB_W5500_SPI_HOST
+        int "W5500 SPI host (1=SPI2_HOST, 2=SPI3_HOST)"
+        default 1
+        range 1 3
+
+    config EB_W5500_MOSI
+        int "W5500 MOSI GPIO"
+        default 11
+
+    config EB_W5500_MISO
+        int "W5500 MISO GPIO"
+        default 13
+
+    config EB_W5500_SCLK
+        int "W5500 SCLK GPIO"
+        default 12
+
+    config EB_W5500_CS
+        int "W5500 CS GPIO"
+        default 10
+
+    config EB_W5500_INT
+        int "W5500 INT GPIO (-1 = polling mode)"
+        default 9
+
+    config EB_W5500_RST
+        int "W5500 RST GPIO (-1 = none)"
+        default 14
+
+    config EB_W5500_SPI_CLOCK_MHZ
+        int "W5500 SPI clock MHz"
+        default 25
+        range 5 40
         help
-            Starts W5500 SPI Ethernet, DHCP and a touch-driven text browser
-            (DuckDuckGo/Google search) on the LCD. This is a standalone
-            application mode: the camera subsystem is never initialized and
-            the browser owns the display from boot.
-            With this option disabled the app behaves exactly like the
-            feature/camos camera app.
+            W5500 datasheet allows up to 33.3 MHz; start at 25 and raise
+            only with short wires and a stable 3.3V rail.
 
-    if APP_ENABLE_ETHERNET_BROWSER
+    config EB_TOUCH_I2C_PORT
+        int "Touch I2C port"
+        default 1
 
-        config EB_W5500_SPI_HOST
-            int "W5500 SPI host (1=SPI2_HOST, 2=SPI3_HOST)"
-            default 1
-            range 1 3
+    config EB_TOUCH_I2C_SCL
+        int "Touch I2C SCL GPIO"
+        default 6
+        help
+            The touch controller of the board is not documented; the
+            driver probes GT911 (0x5D/0x14), FT5x06 (0x38) and CST816
+            (0x15) on this bus. Verify pins against the board schematic.
 
-        config EB_W5500_MOSI
-            int "W5500 MOSI GPIO"
-            default 11
+    config EB_TOUCH_I2C_SDA
+        int "Touch I2C SDA GPIO"
+        default 5
 
-        config EB_W5500_MISO
-            int "W5500 MISO GPIO"
-            default 13
+    config EB_TOUCH_SWAP_XY
+        bool "Touch: swap X/Y"
+        default n
 
-        config EB_W5500_SCLK
-            int "W5500 SCLK GPIO"
-            default 12
+    config EB_TOUCH_MIRROR_X
+        bool "Touch: mirror X"
+        default n
 
-        config EB_W5500_CS
-            int "W5500 CS GPIO"
-            default 10
+    config EB_TOUCH_MIRROR_Y
+        bool "Touch: mirror Y"
+        default n
 
-        config EB_W5500_INT
-            int "W5500 INT GPIO (-1 = polling mode)"
-            default 9
+    choice EB_SEARCH_ENGINE
+        prompt "Search engine"
+        default EB_ENGINE_DUCKDUCKGO
+        help
+            DuckDuckGo HTML endpoint has a stable markup and no consent
+            wall. Google markup changes often and may serve captcha to
+            datacenter IPs; it is best-effort.
 
-        config EB_W5500_RST
-            int "W5500 RST GPIO (-1 = none)"
-            default 14
+        config EB_ENGINE_DUCKDUCKGO
+            bool "DuckDuckGo (html endpoint)"
 
-        config EB_W5500_SPI_CLOCK_MHZ
-            int "W5500 SPI clock MHz"
-            default 25
-            range 5 40
-            help
-                W5500 datasheet allows up to 33.3 MHz; start at 25 and raise
-                only with short wires and a stable 3.3V rail.
+        config EB_ENGINE_GOOGLE
+            bool "Google (best-effort)"
+    endchoice
 
-        config EB_TOUCH_I2C_PORT
-            int "Touch I2C port"
-            default 1
+    config EB_MAX_BODY_KB
+        int "Max HTTP body size (KB)"
+        default 384
+        range 64 1024
 
-        config EB_TOUCH_I2C_SCL
-            int "Touch I2C SCL GPIO"
-            default 6
-            help
-                The touch controller of the board is not documented; the
-                driver probes GT911 (0x5D/0x14), FT5x06 (0x38) and CST816
-                (0x15) on this bus. Verify pins against the board schematic.
-
-        config EB_TOUCH_I2C_SDA
-            int "Touch I2C SDA GPIO"
-            default 5
-
-        config EB_TOUCH_SWAP_XY
-            bool "Touch: swap X/Y"
-            default n
-
-        config EB_TOUCH_MIRROR_X
-            bool "Touch: mirror X"
-            default n
-
-        config EB_TOUCH_MIRROR_Y
-            bool "Touch: mirror Y"
-            default n
-
-        choice EB_SEARCH_ENGINE
-            prompt "Search engine"
-            default EB_ENGINE_DUCKDUCKGO
-            help
-                DuckDuckGo HTML endpoint has a stable markup and no consent
-                wall. Google markup changes often and may serve captcha to
-                datacenter IPs; it is best-effort.
-
-            config EB_ENGINE_DUCKDUCKGO
-                bool "DuckDuckGo (html endpoint)"
-
-            config EB_ENGINE_GOOGLE
-                bool "Google (best-effort)"
-        endchoice
-
-        config EB_MAX_BODY_KB
-            int "Max HTTP body size (KB)"
-            default 384
-            range 64 1024
-
-    endif
 endmenu
 
 menu "Example Boards Types"

@@ -1,7 +1,7 @@
-# ESP-IDF 5.5.x / 6.0.x — JC1060P470C_I_W_Y camera photo app
-# Board: ESP32-P4 rev v1.3 + OV02C10 + JD9165 1024x600
-# Recommended: ESP-IDF 5.5.5 (proven ~30 fps).
-# IDF 6.0.3: components/ содержит cam_sensor 1.2.1 + адаптированные esp_video/esp_ipa/esp_lcd_jd9365
+# ESP-IDF 6.0.x — JC1060P470C CamBrowser (Ethernet web browser, camera removed)
+# Board: ESP32-P4 rev v1.3 + JD9165 1024x600 + W5500 SPI Ethernet
+# The camera stack (esp_video / esp_cam_sensor / esp_ipa / OV02C10) lives in
+# the feature/camos branch only; this branch carries no camera options.
 #
 CONFIG_IDF_TARGET="esp32p4"
 
@@ -20,8 +20,6 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x10000
 
-CONFIG_EXAMPLE_MIPI_CSI_SCCB_I2C_SCL_PIN=8
-CONFIG_EXAMPLE_MIPI_CSI_SCCB_I2C_SDA_PIN=7
 CONFIG_BOARD_TYPE_JC1060P470=y
 
 CONFIG_SPIRAM=y
@@ -30,45 +28,18 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LWIP_HOOK_IP6_INPUT_NONE=y
 
-CONFIG_CAMERA_OV02C10=y
-CONFIG_CAMERA_OV02C10_AUTO_DETECT=y
-CONFIG_CAMERA_OV02C10_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
-# Режим сенсора по умолчанию (безопасный 720p). Для полных 2 MP выберите
-# CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920x1080_30FPS (+ см. docs/OV02C10_CAPABILITIES.md):
-# menuconfig -> Camera Sensors Support -> OV02C10 -> Default format select
-CONFIG_CAMERA_OV02C10_MIPI_RAW10_1288x728_30FPS=y
-# CONFIG_CAMERA_OV02C10_MIPI_RAW10_1920x1080_30FPS is not set
-# CONFIG_CAMERA_OV02C10_ISP_AF_ENABLE is not set
-CONFIG_CAMERA_OV02C10_DEFAULT_IPA_JSON_CONFIGURATION_FILE=y
-
-# --- Новые опции ветки ov02c10-full-capability (docs/OV02C10_CAPABILITIES.md) ---
-# Тестовый шаблон сенсора: 0=выкл, 1-4=типы цветных полос
-CONFIG_EXAMPLE_CAM_TEST_PATTERN=0
-# Переопределение fps: 0=дефолт режима (30), 1-30=ниже (VBLANK/VTS, длиннее экспозиция)
-CONFIG_EXAMPLE_CAM_TARGET_FPS=0
-# Вывод на LCD: кроп по центру 1:1 (макс. резкость) или вписать весь кадр (letterbox)
-CONFIG_EXAMPLE_CAM_DISPLAY_FIT_CROP=y
-
-CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
-CONFIG_IDF_EXPERIMENTAL_FEATURES=y
-
 # CONFIG_PM_ENABLE is not set
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
 
-# --- Диагностика/защита (обновлено после находки первопричины) ---
-# Первопричина краша esp_vfs_ioctl и мерцания экрана найдена и устранена в коде:
-# EXAMPLE_LCD_V_RES был 608 при реальном фреймбуфере 1024x600 -> PPA писал
-# 17 КБ за каждый кадр мимо конца буфера (порча кучи PSRAM). Ниже - оставленная
-# защита от подобных проблем.
-#
+# --- Диагностика/защита ---
 # Уровень логов: INFO по умолчанию (DEBUG захламляет лог сотнями строк
 # MSPI DQS/MSPI Timing при каждом старте), DEBUG доступен через menuconfig:
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 #
 # Структуры VFS принудительно во внутренней RAM (защита от порчи в PSRAM):
-CONFIG_VFS_SELECT_IN_RAM=y
+CONFIG_VFS_SELECT_INRAM=y
 #
 # Полное «отравление» кучи: canary вокруг каждого блока, abort с адресом
-# при попытке malloc/free затёртого блока — индикатор остаточной порчи:
+# при попытке malloc/free затёртого блока — ранний индикатор порчи памяти:
 CONFIG_HEAP_POISONING_COMPREHENSIVE=y

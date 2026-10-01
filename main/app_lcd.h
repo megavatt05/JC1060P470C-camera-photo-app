@@ -35,7 +35,9 @@
 
 #endif
 
-#define EXAMPLE_LCD_BUF_NUM                 (CONFIG_EXAMPLE_CAM_BUF_COUNT)
+/* Number of DPI panel frame buffers (num_fbs). CamBrowser alternates
+ * between fb 0 and fb 1, so 2 is exactly what the browser needs. */
+#define EXAMPLE_LCD_BUF_NUM                 (2)
 
 #if CONFIG_LCD_PIXEL_FORMAT_RGB565
 #define EXAMPLE_LCD_BIT_PER_PIXEL           (16)
