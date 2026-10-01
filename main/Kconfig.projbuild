@@ -153,6 +153,108 @@ menu "Example Configuration"
 
 endmenu
 
+menu "Ethernet Browser (CamBrowser)"
+
+    config APP_ENABLE_ETHERNET_BROWSER
+        bool "Enable CamBrowser (Ethernet + web browser on LCD)"
+        default y
+        help
+            Starts W5500 SPI Ethernet, DHCP and a touch-driven text browser
+            (DuckDuckGo/Google search) on the LCD. The camera preview is
+            stopped when the browser UI takes over the screen.
+            With this option disabled the app behaves exactly like the
+            feature/camos camera app.
+
+    if APP_ENABLE_ETHERNET_BROWSER
+
+        config EB_W5500_SPI_HOST
+            int "W5500 SPI host (1=SPI2_HOST, 2=SPI3_HOST)"
+            default 1
+            range 1 3
+
+        config EB_W5500_MOSI
+            int "W5500 MOSI GPIO"
+            default 11
+
+        config EB_W5500_MISO
+            int "W5500 MISO GPIO"
+            default 13
+
+        config EB_W5500_SCLK
+            int "W5500 SCLK GPIO"
+            default 12
+
+        config EB_W5500_CS
+            int "W5500 CS GPIO"
+            default 10
+
+        config EB_W5500_INT
+            int "W5500 INT GPIO (-1 = polling mode)"
+            default 9
+
+        config EB_W5500_RST
+            int "W5500 RST GPIO (-1 = none)"
+            default 14
+
+        config EB_W5500_SPI_CLOCK_MHZ
+            int "W5500 SPI clock MHz"
+            default 25
+            range 5 40
+            help
+                W5500 datasheet allows up to 33.3 MHz; start at 25 and raise
+                only with short wires and a stable 3.3V rail.
+
+        config EB_TOUCH_I2C_PORT
+            int "Touch I2C port"
+            default 1
+
+        config EB_TOUCH_I2C_SCL
+            int "Touch I2C SCL GPIO"
+            default 6
+            help
+                The touch controller of the board is not documented; the
+                driver probes GT911 (0x5D/0x14), FT5x06 (0x38) and CST816
+                (0x15) on this bus. Verify pins against the board schematic.
+
+        config EB_TOUCH_I2C_SDA
+            int "Touch I2C SDA GPIO"
+            default 5
+
+        config EB_TOUCH_SWAP_XY
+            bool "Touch: swap X/Y"
+            default n
+
+        config EB_TOUCH_MIRROR_X
+            bool "Touch: mirror X"
+            default n
+
+        config EB_TOUCH_MIRROR_Y
+            bool "Touch: mirror Y"
+            default n
+
+        choice EB_SEARCH_ENGINE
+            prompt "Search engine"
+            default EB_ENGINE_DUCKDUCKGO
+            help
+                DuckDuckGo HTML endpoint has a stable markup and no consent
+                wall. Google markup changes often and may serve captcha to
+                datacenter IPs; it is best-effort.
+
+            config EB_ENGINE_DUCKDUCKGO
+                bool "DuckDuckGo (html endpoint)"
+
+            config EB_ENGINE_GOOGLE
+                bool "Google (best-effort)"
+        endchoice
+
+        config EB_MAX_BODY_KB
+            int "Max HTTP body size (KB)"
+            default 384
+            range 64 1024
+
+    endif
+endmenu
+
 menu "Example Boards Types"
 
     choice

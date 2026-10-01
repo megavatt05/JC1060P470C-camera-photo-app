@@ -52,4 +52,19 @@
  */
 esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle);
 
+/**
+ * @brief Get one of the DPI panel's own frame buffers (full-screen size).
+ *
+ * @param index Buffer index, 0 .. EXAMPLE_LCD_BUF_NUM-1
+ * @param out_fb Receives the frame buffer pointer (RGB565, H_RES x V_RES)
+ */
+void app_lcd_get_fb(int index, void **out_fb);
+
+/**
+ * @brief Send the frame buffer to the panel (full-screen draw).
+ *
+ * @param index Buffer index, 0 .. EXAMPLE_LCD_BUF_NUM-1
+ */
+void app_lcd_flush(int index);
+
 #endif

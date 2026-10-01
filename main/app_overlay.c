@@ -24,8 +24,9 @@
 #define OVERLAY_SCALE   3   /* glyph pixel size: 8x8 -> 24x24 per char */
 #define OVERLAY_PAD     6   /* black box padding around the text, px */
 
-/* ASCII 0x20..0x7E, one byte per row, LSB = leftmost pixel */
-static const uint8_t s_font8x8[95][8] = {
+/* ASCII 0x20..0x7E, one byte per row, LSB = leftmost pixel.
+ * Non-static so the CamBrowser UI (camos/ui.c) reuses the same glyphs. */
+const uint8_t app_overlay_font8x8[95][8] = {
     { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },   /* 0x20   */
     { 0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00 },   /* 0x21 \x21 */
     { 0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },   /* 0x22 \x22 */
@@ -132,6 +133,12 @@ static int font_index(char c)
     return c - 0x20;
 }
 
+static const uint8_t *font_glyph(char c)
+{
+    int idx = font_index(c);
+    return (idx >= 0) ? app_overlay_font8x8[idx] : app_overlay_font8x8['?' - 0x20];
+}
+
 static void fill_rect_rgb565(uint16_t *fb, int fb_w, int fb_h,
                              int x0, int y0, int x1, int y1, uint16_t color)
 {
@@ -152,8 +159,7 @@ static void draw_char_rgb565(uint16_t *fb, int fb_w, int fb_h,
                              int x, int y, char c, int scale,
                              uint16_t fg, uint16_t bg)
 {
-    int idx = font_index(c);
-    const uint8_t *glyph = (idx >= 0) ? s_font8x8[idx] : s_font8x8['?' - 0x20];
+    const uint8_t *glyph = font_glyph(c);
 
     for (int row = 0; row < FONT_H; row++) {
         for (int col = 0; col < FONT_W; col++) {

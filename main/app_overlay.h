@@ -13,6 +13,10 @@
 extern "C" {
 #endif
 
+/* ASCII 0x20..0x7E glyph table, one byte per row, LSB = leftmost pixel.
+ * Shared with the CamBrowser UI (camos/ui.c). */
+extern const uint8_t app_overlay_font8x8[95][8];
+
 /**
  * @brief Draw the FPS readout into an RGB565 LCD frame buffer.
  *

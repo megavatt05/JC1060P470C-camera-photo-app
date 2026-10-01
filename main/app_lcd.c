@@ -27,6 +27,10 @@ static esp_lcd_dsi_bus_handle_t mipi_dsi_bus;
 static esp_lcd_panel_io_handle_t mipi_dbi_io;
 static esp_lcd_panel_handle_t display_handle;
 
+/* Panel's own DPI frame buffers, cached in app_lcd_init() for direct drawing */
+static void *s_panel_fb[3];
+static int   s_panel_fb_num = 0;
+
 
 #if CONFIG_BOARD_TYPE_JC8012P4A1
 
@@ -562,7 +566,37 @@ esp_err_t app_lcd_init(esp_lcd_panel_handle_t *panel_handle)
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_enable_dma2d(display_handle));
 #endif
 
+    /* Cache the panel's own frame buffers for the direct-drawing consumers
+     * (CamBrowser UI draws into them and flushes without the PPA path). */
+#if EXAMPLE_LCD_BUF_NUM == 2
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(display_handle, 2,
+                     &s_panel_fb[0], &s_panel_fb[1]));
+    s_panel_fb_num = 2;
+#else
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(display_handle, 3,
+                     &s_panel_fb[0], &s_panel_fb[1], &s_panel_fb[2]));
+    s_panel_fb_num = 3;
+#endif
+
     *panel_handle = display_handle;
 
     return ESP_OK;
+}
+
+void app_lcd_get_fb(int index, void **out_fb)
+{
+    if (out_fb == NULL || index < 0 || index >= s_panel_fb_num) {
+        return;
+    }
+    *out_fb = s_panel_fb[index];
+}
+
+void app_lcd_flush(int index)
+{
+    if (index < 0 || index >= s_panel_fb_num || display_handle == NULL) {
+        return;
+    }
+    esp_lcd_panel_draw_bitmap(display_handle, 0, 0,
+                              EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES,
+                              s_panel_fb[index]);
 }

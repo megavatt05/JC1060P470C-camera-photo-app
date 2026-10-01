@@ -20,6 +20,7 @@
 #include "app_video.h"
 #include "app_lcd.h"
 #include "app_overlay.h"
+#include "browser/browser.h"
 
 #define ALIGN_UP(num, align)    (((num) + ((align) - 1)) & ~((align) - 1))
 
@@ -182,6 +183,14 @@ void app_main(void)
 
     // Start the camera stream task
     ESP_ERROR_CHECK(app_video_stream_task_start(video_cam_fd0, 0, NULL));
+
+#if CONFIG_APP_ENABLE_ETHERNET_BROWSER
+    /* CamBrowser: W5500 Ethernet + DHCP + touch browser on the LCD.
+     * Spawns its own task; it stops the camera preview ~1s after boot and
+     * takes the display over (docs/ETHERNET_BROWSER.md). Disable the option
+     * in menuconfig to keep the pure camera app. */
+    browser_start(video_cam_fd0);
+#endif
 }
 
 static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index, uint32_t camera_buf_hes, uint32_t camera_buf_ves, size_t camera_buf_len, void *user_data)
