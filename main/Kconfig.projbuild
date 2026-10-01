@@ -44,6 +44,18 @@ menu "Example Configuration"
         bool "enable print fps rate value"
         default y
 
+    config EXAMPLE_QUIET_LOGS
+        bool "Quiet logs (force INFO level at boot)"
+        default y
+        help
+            Force the runtime log level to INFO at the very start of app_main,
+            regardless of what CONFIG_LOG_DEFAULT_LEVEL ended up in a stale
+            sdkconfig. Per-frame ISP DEBUG statistics (~1 KB per frame)
+            saturate the 115200 baud console and throttle the whole video
+            pipeline down to 5-10 fps. sdkconfig.defaults alone is not
+            enough: it is only applied when sdkconfig is regenerated.
+            Disable only for deep diagnostics with a fast console.
+
     config EXAMPLE_ENABLE_LCD_FPS_OVERLAY
         bool "Show FPS readout on the LCD (RGB565 only)"
         default y

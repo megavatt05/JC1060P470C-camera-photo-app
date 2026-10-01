@@ -112,6 +112,17 @@ static float s_measured_fps;
 
 void app_main(void)
 {
+#if CONFIG_EXAMPLE_QUIET_LOGS
+    /* Защита от "залипшего" sdkconfig. sdkconfig.defaults применяется только
+     * при пересоздании sdkconfig; если проект собран поверх старого
+     * диагностического конфига (CONFIG_LOG_DEFAULT_LEVEL_DEBUG), пер-кадровая
+     * статистика ISP (~1 КБ текста на кадр) на 115200 бод душит видео-конвейер
+     * (замерено: 5-10 fps вместо 30). Принудительно ставим INFO до любой
+     * инициализации, чтобы поведение не зависело от состояния sdkconfig.
+     * Вернуть отладку: menuconfig -> Example Configuration -> Quiet logs = off. */
+    esp_log_level_set("*", ESP_LOG_INFO);
+#endif
+
     // Initialize the LCD
     bsp_display_brightness_init();
     ESP_ERROR_CHECK(app_lcd_init(&display_panel));
