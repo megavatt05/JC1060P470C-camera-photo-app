@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: CC0-1.0
  *
  * CamBrowser — standalone Ethernet web browser for JC1060P470C_I_W_Y
- * (ESP32-P4 + JD9165 1024x600 MIPI-DSI + W5500 SPI Ethernet + touch).
+ * (ESP32-P4 + JD9165 1024x600 MIPI-DSI + IP101 PHY on the internal EMAC
+ * / RMII + touch).
  *
  * This branch is browser-only: the camera subsystem (esp_video, MIPI-CSI,
  * sensor, ISP, PPA) is intentionally absent. app_main boots straight into

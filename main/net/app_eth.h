@@ -1,7 +1,8 @@
 /*
  * SPDX-License-Identifier: CC0-1.0
  *
- * CamBrowser network bring-up API (W5500 SPI Ethernet + DHCP).
+ * CamBrowser network bring-up API (IP101 PHY on the ESP32-P4 internal
+ * EMAC / RMII + DHCP).
  */
 
 #ifndef APP_ETH_H
@@ -20,10 +21,12 @@ typedef enum {
 } app_eth_state_t;
 
 /**
- * @brief Initialize SPI, W5500, netif and start the driver + DHCP.
+ * @brief Initialize the internal EMAC + IP101 PHY, netif and start the
+ *        driver + DHCP.
  *
  * Safe to call once; subsequent calls are no-ops returning ESP_OK.
- * All pins/parameters come from Kconfig (EB_W5500_*).
+ * All pins/parameters come from Kconfig (EB_ETH_*): MDC 31, MDIO 52,
+ * RMII REF_CLK input 50, PHY reset 51, PHY SMI address 1.
  *
  * @return ESP_OK on success
  */

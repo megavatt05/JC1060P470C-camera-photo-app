@@ -25,42 +25,41 @@ endmenu
 
 menu "CamBrowser (Ethernet Browser on LCD)"
 
-    config EB_W5500_SPI_HOST
-        int "W5500 SPI host (1=SPI2_HOST, 2=SPI3_HOST)"
-        default 1
-        range 1 3
-
-    config EB_W5500_MOSI
-        int "W5500 MOSI GPIO"
-        default 11
-
-    config EB_W5500_MISO
-        int "W5500 MISO GPIO"
-        default 13
-
-    config EB_W5500_SCLK
-        int "W5500 SCLK GPIO"
-        default 12
-
-    config EB_W5500_CS
-        int "W5500 CS GPIO"
-        default 10
-
-    config EB_W5500_INT
-        int "W5500 INT GPIO (-1 = polling mode)"
-        default 9
-
-    config EB_W5500_RST
-        int "W5500 RST GPIO (-1 = none)"
-        default 14
-
-    config EB_W5500_SPI_CLOCK_MHZ
-        int "W5500 SPI clock MHz"
-        default 25
-        range 5 40
+    config EB_ETH_MDC_GPIO
+        int "IP101 SMI MDC GPIO"
+        default 31
         help
-            W5500 datasheet allows up to 33.3 MHz; start at 25 and raise
-            only with short wires and a stable 3.3V rail.
+            Fixed by the board schematic (JP1 header, IP101 pin 22).
+
+    config EB_ETH_MDIO_GPIO
+        int "IP101 SMI MDIO GPIO"
+        default 52
+        help
+            Fixed by the board schematic (JP1 header, IP101 pin 23).
+
+    config EB_ETH_RMII_CLK_GPIO
+        int "RMII REF_CLK GPIO (50 MHz input from the PHY)"
+        default 50
+        help
+            The IP101 generates 50 MHz from its own 25 MHz crystal and
+            feeds the ESP32-P4 EMAC on this pin, so the EMAC must run in
+            EMAC_CLK_EXT_IN mode (hardcoded in app_eth.c).
+
+    config EB_ETH_RST_GPIO
+        int "IP101 reset GPIO (active low, -1 = none)"
+        default 51
+        help
+            PHY_RSTN of the board; IP101 pin 32. app_eth.c pulses it low
+            before the first SMI transaction so the chip-ID check during
+            esp_eth_driver_install() cannot fail on a PHY held in reset.
+
+    config EB_ETH_PHY_ADDR
+        int "IP101 SMI address"
+        default 1
+        range 0 31
+        help
+            The board pulls PHY_AD0 high, so the PHY answers at SMI
+            address 1 (verified on the schematic).
 
     config EB_TOUCH_I2C_PORT
         int "Touch I2C port"
