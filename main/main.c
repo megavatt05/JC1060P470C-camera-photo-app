@@ -30,6 +30,7 @@
 
 static const char *TAG = "app_main";
 
+#if !CONFIG_APP_ENABLE_ETHERNET_BROWSER
 /* Set one V4L2 control on the video device (esp_video does not validate
  * ctrl_class, so V4L2_CTRL_CLASS_USER works for any mapped control). */
 static esp_err_t app_video_set_ctrl(int video_fd, uint32_t v4l2_cid, int32_t value)
@@ -97,10 +98,14 @@ static void app_camera_apply_runtime_controls(int video_fd)
 }
 
 static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index, uint32_t camera_buf_hes, uint32_t camera_buf_ves, size_t camera_buf_len, void *user_data);
+#endif /* !CONFIG_APP_ENABLE_ETHERNET_BROWSER */
+
 static esp_err_t bsp_display_brightness_init(void);
 static esp_err_t bsp_display_backlight_on(void);
 
 static esp_lcd_panel_handle_t display_panel;
+
+#if !CONFIG_APP_ENABLE_ETHERNET_BROWSER
 static ppa_client_handle_t ppa_srm_handle = NULL;
 static size_t data_cache_line_size = 0;
 static void *lcd_buffer[EXAMPLE_LCD_BUF_NUM];
@@ -110,6 +115,7 @@ static void *lcd_buffer[EXAMPLE_LCD_BUF_NUM];
  * on-screen value and the log line both update twice per second. */
 static float s_measured_fps;
 #endif
+#endif /* !CONFIG_APP_ENABLE_ETHERNET_BROWSER */
 
 void app_main(void)
 {
@@ -128,6 +134,15 @@ void app_main(void)
     bsp_display_brightness_init();
     ESP_ERROR_CHECK(app_lcd_init(&display_panel));
 
+#if CONFIG_APP_ENABLE_ETHERNET_BROWSER
+    /* CamBrowser: standalone Ethernet + touch browser. The camera subsystem
+     * (esp_video, sensor, ISP, PPA) is never initialized - the browser owns
+     * the display from the very first frame, so a missing or failing camera
+     * can never block or crash it (docs/ETHERNET_BROWSER.md). Disable this
+     * option in menuconfig for the pure camera app (#else branch below). */
+    bsp_display_backlight_on();
+    browser_start();
+#else
     // Initialize the PPA
     ppa_client_config_t ppa_srm_config = {
         .oper_type = PPA_OPERATION_SRM,
@@ -183,16 +198,10 @@ void app_main(void)
 
     // Start the camera stream task
     ESP_ERROR_CHECK(app_video_stream_task_start(video_cam_fd0, 0, NULL));
-
-#if CONFIG_APP_ENABLE_ETHERNET_BROWSER
-    /* CamBrowser: W5500 Ethernet + DHCP + touch browser on the LCD.
-     * Spawns its own task; it stops the camera preview ~1s after boot and
-     * takes the display over (docs/ETHERNET_BROWSER.md). Disable the option
-     * in menuconfig to keep the pure camera app. */
-    browser_start(video_cam_fd0);
-#endif
+#endif /* CONFIG_APP_ENABLE_ETHERNET_BROWSER */
 }
 
+#if !CONFIG_APP_ENABLE_ETHERNET_BROWSER
 static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index, uint32_t camera_buf_hes, uint32_t camera_buf_ves, size_t camera_buf_len, void *user_data)
 {
     /* Camera-to-LCD geometry, computed once for the actual sensor mode
@@ -320,6 +329,7 @@ static void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf
 
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(display_panel, 0, 0, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, lcd_buffer[camera_buf_index]));
 }
+#endif /* !CONFIG_APP_ENABLE_ETHERNET_BROWSER */
 
 #define BSP_LCD_BACKLIGHT   GPIO_NUM_23
 #define LCD_LEDC_CH         LEDC_CHANNEL_0

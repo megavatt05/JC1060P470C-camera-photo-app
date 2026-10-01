@@ -24,7 +24,6 @@
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
 #include "app_lcd.h"
-#include "app_video.h"
 #include "net/app_eth.h"
 #include "camos/ui.h"
 #include "camos/touch.h"
@@ -85,7 +84,6 @@ typedef enum {
 /* --- Static data ---------------------------------------------------------- */
 
 static struct {
-    int video_fd;
     int fb_idx;
     browser_state_t state;
 
@@ -580,11 +578,8 @@ static void query_append(char c)
 
 static void browser_task(void *arg)
 {
-    /* Give the camera preview a moment, then take the screen over */
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    app_video_stream_task_stop(br.video_fd);
-    vTaskDelay(pdMS_TO_TICKS(600));
-
+    /* Standalone boot: the LCD is already initialized, the browser owns the
+     * screen from the first frame - no camera to stop, draw immediately */
     br.state = ST_SPLASH;
     draw_screen();
 
@@ -715,11 +710,10 @@ static void browser_task(void *arg)
     }
 }
 
-void browser_start(int video_fd)
+void browser_start(void)
 {
     memset(&br, 0, sizeof(br));
-    br.video_fd = video_fd;
-    br.fb_idx = 1;  /* camera used fb[0..n] round-robin; start on the second */
+    br.fb_idx = 1;  /* draw on the second fb, flush the first via app_lcd_flush */
 #if CONFIG_EB_ENGINE_GOOGLE
     br.engine_google = true;
 #endif

@@ -160,8 +160,9 @@ menu "Ethernet Browser (CamBrowser)"
         default y
         help
             Starts W5500 SPI Ethernet, DHCP and a touch-driven text browser
-            (DuckDuckGo/Google search) on the LCD. The camera preview is
-            stopped when the browser UI takes over the screen.
+            (DuckDuckGo/Google search) on the LCD. This is a standalone
+            application mode: the camera subsystem is never initialized and
+            the browser owns the display from boot.
             With this option disabled the app behaves exactly like the
             feature/camos camera app.
 

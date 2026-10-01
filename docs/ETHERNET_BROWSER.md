@@ -55,7 +55,9 @@ SPI-шина по умолчанию GPSPI2 (`EB_W5500_SPI_HOST=1`; `2` = GPSPI3
 
 ```
 main/
-  main.c                 — точка входа: камера + запуск сети/браузера (небольшая интеграция)
+  main.c                 — точка входа: при CamBrowser камера НЕ инициализируется,
+                           сразу backlight + browser_start(); камерный путь целиком
+                           под #else (чистый CamOS без изменений)
   app_lcd.c/h            + fb-акцессоры для браузера (app_lcd_get_fb / app_lcd_flush)
   net/
     app_eth.c/h          — W5500 (SPI) → esp_eth → esp_netif → DHCP, статус API

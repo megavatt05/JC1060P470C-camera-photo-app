@@ -14,12 +14,11 @@ extern "C" {
 /**
  * @brief Start the CamBrowser (Ethernet, touch and the UI task).
  *
- * The browser task stops the camera stream ~1s after boot and takes over
- * the display. Call once from app_main after app_video_stream_task_start().
- *
- * @param video_fd Camera video device fd (used to stop the preview stream)
+ * Standalone application mode: the camera subsystem is never initialized
+ * and the browser owns the display from the very first frame. Call once
+ * from app_main after app_lcd_init().
  */
-void browser_start(int video_fd);
+void browser_start(void);
 
 #ifdef __cplusplus
 }
