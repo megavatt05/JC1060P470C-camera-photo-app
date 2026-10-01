@@ -24,6 +24,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "driver/spi_master.h"
+#include "driver/gpio.h"
 #include "sdkconfig.h"
 #include "net/app_eth.h"
 
@@ -130,6 +131,40 @@ esp_err_t app_eth_start(void)
         ESP_LOGE(TAG, "spi_bus_initialize: %s", esp_err_to_name(err));
         return err;
     }
+
+#if CONFIG_EB_W5500_RST >= 0
+    /* Hard reset of the W5500 before the first SPI transaction. The PHY
+     * driver's own RST pulse (phy_config.reset_gpio_num) happens only during
+     * esp_eth_start() - AFTER the MAC init has already read the chip ID, so
+     * a module sitting in a bad power-on state fails the ID check with
+     * "version mismatched, expected 0x04, got 0x00". */
+    {
+        gpio_config_t rst_io = {
+            .pin_bit_mask = 1ULL << CONFIG_EB_W5500_RST,
+            .mode = GPIO_MODE_OUTPUT,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        if (gpio_config(&rst_io) == ESP_OK) {
+            gpio_set_level(CONFIG_EB_W5500_RST, 0);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            gpio_set_level(CONFIG_EB_W5500_RST, 1);
+            vTaskDelay(pdMS_TO_TICKS(100));     /* PLL lock after reset deassert */
+        }
+    }
+#endif
+
+#if CONFIG_EB_W5500_INT >= 0
+    /* The registry W5500 driver (espressif/w5500 v2) attaches its INT-pin
+     * ISR with gpio_isr_handler_add(), which requires the global GPIO ISR
+     * service to be installed beforehand - otherwise boot fails with
+     * "GPIO isr service is not installed". */
+    {
+        esp_err_t isr_err = gpio_install_isr_service(0);
+        if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "gpio_install_isr_service: %s", esp_err_to_name(isr_err));
+        }
+    }
+#endif
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
     /* IDF v6 (espressif/w5500 v2): the driver owns the SPI device and calls

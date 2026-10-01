@@ -46,16 +46,16 @@ static struct {
     int max_points;
 } s_tp;
 
-static esp_err_t tp_bus_init(void)
+static esp_err_t tp_bus_init(int port, int scl, int sda)
 {
     if (s_tp.bus != NULL) {
         return ESP_OK;
     }
 
     i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = CONFIG_EB_TOUCH_I2C_PORT,
-        .sda_io_num = CONFIG_EB_TOUCH_I2C_SDA,
-        .scl_io_num = CONFIG_EB_TOUCH_I2C_SCL,
+        .i2c_port = port,
+        .sda_io_num = sda,
+        .scl_io_num = scl,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
@@ -63,7 +63,8 @@ static esp_err_t tp_bus_init(void)
 
     esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_tp.bus);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
+        ESP_LOGD(TAG, "i2c bus port %d (SCL=%d SDA=%d) init failed: %s",
+                 port, scl, sda, esp_err_to_name(err));
     }
     return err;
 }
@@ -128,9 +129,6 @@ esp_err_t touch_init(void)
     if (s_tp.chip != TOUCH_CHIP_NONE) {
         return ESP_OK;
     }
-    if (tp_bus_init() != ESP_OK) {
-        return ESP_FAIL;
-    }
 
     /* Small settle delay: controllers need time after their own power-on
      * reset before I2C becomes responsive (GT911 especially). */
@@ -146,21 +144,43 @@ esp_err_t touch_init(void)
         { 0x15, TOUCH_CHIP_CST816 },
     };
 
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        esp_err_t err = tp_probe_one(candidates[i].addr, candidates[i].chip);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "touch controller found: %s at 0x%02X",
-                     s_tp.chip == TOUCH_CHIP_GT911 ? "GT911" :
-                     s_tp.chip == TOUCH_CHIP_FT5X06 ? "FT5x06" : "CST816",
-                     s_tp.addr);
-            return ESP_OK;
+    /* Bus candidates, tried in order. First: the menuconfig pins. Then the
+     * former camera-SCCB bus pins - on JC1060P470-family boards the touch
+     * controller usually shares that I2C bus with the (now removed) sensor. */
+    static const struct {
+        int port, scl, sda;
+    } buses[] = {
+        { CONFIG_EB_TOUCH_I2C_PORT, CONFIG_EB_TOUCH_I2C_SCL, CONFIG_EB_TOUCH_I2C_SDA },
+        { 0, 8, 7 },
+        { 1, 8, 7 },
+    };
+
+    for (size_t b = 0; b < sizeof(buses) / sizeof(buses[0]); b++) {
+        if (tp_bus_init(buses[b].port, buses[b].scl, buses[b].sda) != ESP_OK) {
+            continue;   /* bus unavailable - try the next candidate */
         }
-        ESP_LOGD(TAG, "probe 0x%02X chip %d failed: %s",
-                 candidates[i].addr, candidates[i].chip, esp_err_to_name(err));
+
+        for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+            esp_err_t err = tp_probe_one(candidates[i].addr, candidates[i].chip);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "touch controller found: %s at 0x%02X "
+                         "(port %d SCL=%d SDA=%d)",
+                         s_tp.chip == TOUCH_CHIP_GT911 ? "GT911" :
+                         s_tp.chip == TOUCH_CHIP_FT5X06 ? "FT5x06" : "CST816",
+                         s_tp.addr, buses[b].port, buses[b].scl, buses[b].sda);
+                return ESP_OK;
+            }
+            ESP_LOGD(TAG, "probe 0x%02X chip %d failed: %s",
+                     candidates[i].addr, candidates[i].chip, esp_err_to_name(err));
+        }
+
+        /* nothing on this bus - release it and try the next candidate */
+        i2c_del_master_bus(s_tp.bus);
+        s_tp.bus = NULL;
     }
 
-    ESP_LOGW(TAG, "no touch controller found on port %d (SCL=%d SDA=%d); "
-             "browser runs without input",
+    ESP_LOGW(TAG, "no touch controller found (tried port %d SCL=%d SDA=%d, "
+             "then SCL=8 SDA=7 on ports 0 and 1); browser runs without input",
              CONFIG_EB_TOUCH_I2C_PORT, CONFIG_EB_TOUCH_I2C_SCL,
              CONFIG_EB_TOUCH_I2C_SDA);
     return ESP_ERR_NOT_FOUND;
