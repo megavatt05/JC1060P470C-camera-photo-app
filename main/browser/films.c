@@ -22,6 +22,24 @@ static const char *TAG = "films";
 #define MOOV_MAX        (4u << 20)  /* 4 MB is plenty even for a 2-hour film  */
 #define FIRST_CHUNK     (64 * 1024)
 
+/* progress callback (see films.h): lets the UI animate a busy card while
+ * these calls block for seconds to minutes */
+static films_prog_fn s_prog_fn;
+static void         *s_prog_arg;
+
+void films_set_prog_cb(films_prog_fn fn, void *ctx)
+{
+    s_prog_fn  = fn;
+    s_prog_arg = ctx;
+}
+
+static void prog(films_prog_t st, uint32_t done, uint32_t total)
+{
+    if (s_prog_fn != NULL) {
+        s_prog_fn(s_prog_arg, st, done, total);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Minimal JSON string extraction (archive.org responses only)        */
 /* ------------------------------------------------------------------ */
@@ -206,6 +224,7 @@ esp_err_t films_search(const char *query, film_item_t *items, int max_items,
     char url[640];
     search_url(query, url, sizeof(url));
 
+    prog(FILMS_PROG_SEARCH, 0, 0);
     char *body = NULL;
     size_t len = 0;
     esp_err_t err = web_get(url, NULL, &body, &len, NULL);
@@ -351,6 +370,7 @@ films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz)
     char meta_url[FILM_IDENT_MAX + 40];
     snprintf(meta_url, sizeof(meta_url), "https://archive.org/metadata/%s", ident);
 
+    prog(FILMS_PROG_METADATA, 0, 0);
     char *body = NULL;
     size_t len = 0;
     esp_err_t err = web_get(meta_url, NULL, &body, &len, NULL);
@@ -494,6 +514,7 @@ static int range_read(const char *url, uint64_t offset,
                      url_short(url), code);
         } else {
             got = 0;
+            uint32_t reported = 0;
             while ((size_t)got < len) {
                 int n = esp_http_client_read(c, (char *)buf + got,
                                              (int)(len - (size_t)got));
@@ -501,6 +522,13 @@ static int range_read(const char *url, uint64_t offset,
                     break;
                 }
                 got += n;
+                /* feed the busy card: a 3 MB moov at ~20 kB/s is minutes
+                 * of dead silence without periodic progress reports */
+                if ((uint32_t)got - reported >= 16 * 1024 ||
+                    (size_t)got >= len) {
+                    reported = (uint32_t)got;
+                    prog(FILMS_PROG_FILE, (uint32_t)got, (uint32_t)len);
+                }
             }
             ESP_LOGI(TAG, "range %s -> HTTP %d, %d bytes",
                      url_short(url), code, got);

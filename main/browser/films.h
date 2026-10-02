@@ -90,6 +90,25 @@ films_play_err_t films_probe_url(const char *url, uint16_t *out_w, uint16_t *out
 /** @brief HTTP status of the last probe request (0 = transport failure). */
 int films_probe_last_status(void);
 
+/* --- Progress feedback -----------------------------------------------------
+ * The films calls block the browser task for seconds to minutes (a moov
+ * atom on a slow cluster node can crawl at ~20 kB/s). The caller installs
+ * a callback that films fires at stage changes and periodically during
+ * long reads so the UI can keep an animated "busy" card on the panel. */
+
+typedef enum {
+    FILMS_PROG_SEARCH = 0,  /* advancedsearch.php request in flight      */
+    FILMS_PROG_METADATA,    /* metadata/<id> request in flight           */
+    FILMS_PROG_FILE,        /* mp4 header read: done/total bytes of the
+                             * current Range request (total may be huge) */
+} films_prog_t;
+
+typedef void (*films_prog_fn)(void *ctx, films_prog_t st,
+                              uint32_t done, uint32_t total);
+
+/** @brief Install the progress callback (fn==NULL disables). Call once. */
+void films_set_prog_cb(films_prog_fn fn, void *ctx);
+
 /** @brief Russian one-liner for a films_play_err_t (for the status line) */
 const char *films_err_str(films_play_err_t e);
 

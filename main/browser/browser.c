@@ -110,6 +110,8 @@ typedef enum {
     ST_RESULTS,
     ST_PAGELOAD,
     ST_PAGE,
+    ST_BUSY,                /* live busy card: animator redraws it while
+                             * the browser task is blocked on the network */
 #if CONFIG_EB_MEDIA_ENABLE
     ST_RADIO,               /* radio screen (stations + controls)      */
     ST_VIDEO,               /* video screen (presets + custom URL)     */
@@ -546,6 +548,27 @@ static int keyboard_hit(int x, int y)
 
 static void draw_screen(void);
 
+/* live busy card: spinner + stage + ticking mm:ss, see implementation.
+ * Used by both the web paths and the media paths - declared outside the
+ * media guard on purpose. */
+static struct {
+    bool     on;          /* animator running                            */
+    bool     quit;        /* animator stop request                       */
+    bool     dead;        /* animator has exited                         */
+    char     title[48];   /* what was tapped / searched                  */
+    char     stage[48];   /* current phase ("проверяю файл")             */
+    char     extra[40];   /* bytes / rate line ("1.2 из 2.9 МБ, 19 кБ/с")*/
+    int64_t  t0;          /* busy window start, us                       */
+    int64_t  stage_t0;    /* current stage start, us (for the rate)      */
+    uint32_t acc_bytes;   /* bytes accumulated in the current stage      */
+    uint32_t prev_done;   /* last FILMS_PROG_FILE done value             */
+} s_busy;
+
+static void busy_open(const char *title);
+static void busy_stage(const char *txt);
+static void busy_bytes(uint32_t done, uint32_t total);
+static void busy_close(void);
+
 #if CONFIG_EB_MEDIA_ENABLE
 
 /* --- Media: internet radio + video (see media/media_player.h) --------------- */
@@ -815,6 +838,8 @@ static bool sd_from_video;      /* which screen opened the list    */
 
 /* where ST_VIDEOP returns after the playback stops */
 static browser_state_t videop_back = ST_VIDEO;
+static char films_msg[96];      /* status line of the films results screen
+                                 * (also used by video_start_fail) */
 
 /* forward decl: sd_play (below) starts videos through it */
 static void video_start_ui(const char *url);
@@ -1008,23 +1033,75 @@ static void draw_urlin(uint16_t *fb)
     draw_keyboard(fb);
 }
 
-/* Start a video (preset or custom URL): loading frame first, then hand
- * the panel over to the render on success. The caller sets videop_back. */
+/* Start a video (preset, custom URL or a film from the catalog): the busy
+ * card stays up through esp_player's whole PREPARING phase (HTTP open +
+ * moov parse on a slow node is another silent minute+), then the panel is
+ * handed over to the render on PLAYING. A tap cancels the wait. The caller
+ * sets videop_back. */
+static void video_start_fail(const char *msg)
+{
+    if (videop_back == ST_FILMSR) {
+        strlcpy(films_msg, msg, sizeof(films_msg));
+    }
+    br.state = videop_back;
+    draw_screen();
+}
+
 static void video_start_ui(const char *url)
 {
-    void *fb = NULL;
-    app_lcd_get_fb(br.fb_idx, &fb);
-    if (fb != NULL) {
-        draw_loading(fb, "видео");
-        app_lcd_flush(br.fb_idx);
-        br.fb_idx ^= 1;
+    if (!s_busy.on) {           /* films path reuses the open busy card */
+        busy_open("видео");
     }
-    if (media_video_start(url) == ESP_OK) {
-        br.state = ST_VIDEOP;       /* no UI drawing until playback stops */
-    } else {
-        br.state = ST_VIDEO;
-        draw_screen();
+    busy_stage("подключаюсь");
+
+    esp_err_t rc = media_video_start(url);
+    if (rc == ESP_OK) {
+        busy_stage("готовлю плеер");
+        /* esp_player prepares asynchronously (HTTP open, moov parse, track
+         * info); CONNECTING ends with PLAYING, ERROR or FINISHED */
+        bool cancel = false, pressed = false;
+        while (media_get_state() == MEDIA_STATE_CONNECTING) {
+            touch_point_t pts[TOUCH_MAX_POINTS];
+            bool now = touch_poll(pts, TOUCH_MAX_POINTS) > 0;
+            if (now) {
+                pressed = true;
+            } else if (pressed) {
+                cancel = true;      /* press-and-release = tap = cancel */
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        /* swallow a still-held finger (max 3 s) so its release cannot
+         * leak a stray tap into the ST_VIDEOP on-screen buttons */
+        int64_t swallow_until = esp_timer_get_time() + 3000000LL;
+        while (pressed && esp_timer_get_time() < swallow_until) {
+            touch_point_t pts[TOUCH_MAX_POINTS];
+            pressed = touch_poll(pts, TOUCH_MAX_POINTS) > 0;
+            if (pressed) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+        }
+        busy_close();   /* animator off BEFORE the render owns the panel */
+
+        if (cancel) {
+            media_stop();
+            ESP_LOGI(TAG, "playback cancelled by tap");
+            video_start_fail("отменено");
+            return;
+        }
+        if (media_get_state() == MEDIA_STATE_PLAYING) {
+            br.state = ST_VIDEOP;   /* render owns the panel from here */
+            return;
+        }
+        media_stop();
+        ESP_LOGW(TAG, "playback did not start (%s)", media_state_str());
+        video_start_fail("плеер: не удалось начать воспроизведение");
+        return;
     }
+
+    busy_close();
+    ESP_LOGW(TAG, "media_video_start failed");
+    video_start_fail("плеер: не удалось запустить конвейер");
 }
 
 /* GO pressed on the URL-input screen (or the keyboard GO): apply the URL */
@@ -1049,22 +1126,21 @@ static void urlin_apply(void)
 static film_item_t film_items[FILMS_MAX];
 static int  films_n;
 static int  films_scroll;
-static char films_msg[96];      /* status line of the results screen */
 
 /* Search the catalog (empty query = "popular" list). Blocking, like
  * do_search(): a static "..." frame stays on the panel while we wait. */
 static void do_films_search(void)
 {
-    void *fb = NULL;
-    app_lcd_get_fb(br.fb_idx, &fb);
-    if (fb != NULL) {
-        draw_loading(fb, "ищем фильмы");
-        app_lcd_flush(br.fb_idx);
-        br.fb_idx ^= 1;
-    }
+    /* live busy card: films_search fires FILMS_PROG_SEARCH through the
+     * callback and the animator keeps the seconds ticking while we wait */
+    busy_open(br.query[0] ? br.query : "популярное");
+    busy_stage("ищу в каталоге");
 
     int n = 0;
     esp_err_t err = films_search(br.query, film_items, FILMS_MAX, &n);
+
+    busy_close();
+
     films_n = n;
     films_scroll = 0;
     if (err != ESP_OK) {
@@ -1085,20 +1161,17 @@ static void open_film(int idx)
     if (idx < 0 || idx >= films_n) {
         return;
     }
-    void *fb = NULL;
-    app_lcd_get_fb(br.fb_idx, &fb);
-    if (fb != NULL) {
-        /* loading frame shows the title, truncated to fit one line */
-        char what[30];
-        strlcpy(what, film_items[idx].title, sizeof(what));
-        size_t wl = strlen(what);
-        while (wl > 0 && (((unsigned char)what[wl - 1]) & 0xC0) == 0x80) {
-            what[--wl] = '\0';
-        }
-        draw_loading(fb, what);
-        app_lcd_flush(br.fb_idx);
-        br.fb_idx ^= 1;
+    /* live busy card with the film title; films_resolve/probe drive the
+     * stage line + byte counter through films_prog_cb while this task is
+     * blocked (a 3 MB moov at ~20 kB/s is minutes of waiting) */
+    char what[40];
+    strlcpy(what, film_items[idx].title, sizeof(what));
+    size_t wl = strlen(what);
+    while (wl > 0 && (((unsigned char)what[wl - 1]) & 0xC0) == 0x80) {
+        what[--wl] = '\0';
     }
+    busy_open(what);
+    busy_stage("читаю метаданные");
 
     char url[FILMS_URL_MAX];
     films_play_err_t r = films_resolve(film_items[idx].ident, url, sizeof(url));
@@ -1107,6 +1180,7 @@ static void open_film(int idx)
         r = films_probe_url(url, &w, &h);
     }
     if (r != FILMS_PLAY_OK) {
+        busy_close();
         if (w != 0 && h != 0) {
             snprintf(films_msg, sizeof(films_msg), "%ux%u: %s",
                      w, h, films_err_str(r));
@@ -1119,8 +1193,9 @@ static void open_film(int idx)
         return;
     }
     ESP_LOGI(TAG, "film ok %ux%u: %s", w, h, url);
+    busy_stage("запускаю плеер");
     videop_back = ST_FILMSR;
-    video_start_ui(url);
+    video_start_ui(url);    /* busy card stays on: prepare phase + cancel */
 }
 
 static void draw_films(uint16_t *fb)
@@ -1415,6 +1490,206 @@ static void draw_loading(uint16_t *fb, const char *what)
             l2, 1, UI_COLOR_BORDER, UI_COLOR_PANEL);
 }
 
+/* --- Live busy card -----------------------------------------------------------
+ * Long phases (web search, page fetch, films metadata, the moov probe, and
+ * the esp_player prepare) used to leave ONE static frame on the panel for
+ * minutes - users read that as "the board hung". While the browser task is
+ * blocked inside those calls, a small animator task (core 0, mostly asleep)
+ * redraws a card every 250 ms: rotating spinner, current stage, and a
+ * mm:ss counter that keeps ticking - visible proof that the board is alive
+ * and it is the server that is slow. Stage text and byte counters arrive
+ * via busy_stage()/busy_bytes() from the browser task (single writer, the
+ * animator only reads - worst case one torn frame for 250 ms, cosmetic). */
+
+/* s_busy itself is defined next to the busy_* declarations above
+ * (video_start_ui reads s_busy.on before this point in the file). */
+
+/* "64 кБ" / "2.9 МБ" - integer math, no %f (safe with any newlib config) */
+static void busy_fmt_kb(char *out, size_t n, uint32_t b)
+{
+    if (b >= 1024u * 1024u) {
+        uint32_t tenth = (uint32_t)(((uint64_t)b * 10u + (1024u * 1024u / 2u)) /
+                                    (1024u * 1024u));
+        snprintf(out, n, "%u.%u МБ", tenth / 10u, tenth % 10u);
+    } else {
+        snprintf(out, n, "%u кБ", (unsigned)((b + 1023u) / 1024u));
+    }
+}
+
+static void draw_busy_frame(uint16_t *fb)
+{
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, LCD_H, UI_COLOR_BG);
+    draw_status_bar(fb);
+
+    const int cw = 680, ch = 260;
+    int cx = (LCD_W - cw) / 2, cy = (LCD_H - ch) / 2 + 8;
+    ui_card(fb, LCD_W, LCD_H, cx, cy, cx + cw, cy + ch, false);
+
+    int phase = (int)((esp_timer_get_time() / 180000LL) & 7);
+    ui_spinner(fb, LCD_W, LCD_H, cx + cw / 2, cy + 46, 15, phase, UI_COLOR_ACCENT);
+
+    char fitted[48];
+    ui_text_fit(fitted, sizeof(fitted),
+                s_busy.title[0] ? s_busy.title : "ждём сеть", cw - 80,
+                UI_SCALE_TEXT);
+    ui_text(fb, LCD_W, LCD_H,
+            cx + (cw - ui_text_width(fitted, UI_SCALE_TEXT)) / 2, cy + 78,
+            fitted, UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    if (s_busy.stage[0] != '\0') {
+        ui_text_fit(fitted, sizeof(fitted), s_busy.stage, cw - 80, UI_SCALE_TEXT);
+        ui_text(fb, LCD_W, LCD_H,
+                cx + (cw - ui_text_width(fitted, UI_SCALE_TEXT)) / 2, cy + 108,
+                fitted, UI_SCALE_TEXT, UI_COLOR_ACCENT, UI_COLOR_PANEL);
+    }
+
+    /* the ticking clock: the whole point of this card */
+    int64_t el = (esp_timer_get_time() - s_busy.t0) / 1000000LL;
+    char line[24];
+    snprintf(line, sizeof(line), "%d:%02d", (int)(el / 60), (int)(el % 60));
+    ui_text(fb, LCD_W, LCD_H,
+            cx + (cw - ui_text_width(line, UI_SCALE_TITLE)) / 2, cy + 146,
+            line, UI_SCALE_TITLE, UI_COLOR_WARN, UI_COLOR_PANEL);
+
+    if (s_busy.extra[0] != '\0') {
+        ui_text(fb, LCD_W, LCD_H,
+                cx + (cw - ui_text_width(s_busy.extra, UI_SCALE_TEXT)) / 2,
+                cy + 186, s_busy.extra, UI_SCALE_TEXT, UI_COLOR_DIM,
+                UI_COLOR_PANEL);
+    }
+
+    const char *hint = (strcmp(s_busy.stage, "готовлю плеер") == 0)
+                       ? "тап по экрану - отменить"
+                       : "плата работает - ждём ответ сервера";
+    ui_text(fb, LCD_W, LCD_H,
+            cx + (cw - ui_text_width(hint, 1)) / 2, cy + ch - 26,
+            hint, 1, UI_COLOR_BORDER, UI_COLOR_PANEL);
+}
+
+#ifndef CAMOS_UI_PREVIEW
+static void busy_animator(void *arg)
+{
+    (void)arg;
+    while (!s_busy.quit) {
+        void *fb = NULL;
+        app_lcd_get_fb(br.fb_idx, &fb);
+        if (fb != NULL) {
+            draw_busy_frame((uint16_t *)fb);
+            app_lcd_flush(br.fb_idx);
+            br.fb_idx ^= 1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    s_busy.dead = true;
+    vTaskDelete(NULL);
+}
+#endif
+
+static void busy_open(const char *title)
+{
+    strlcpy(s_busy.title, (title != NULL) ? title : "", sizeof(s_busy.title));
+    s_busy.stage[0] = '\0';
+    s_busy.extra[0] = '\0';
+    s_busy.acc_bytes = 0;
+    s_busy.prev_done = 0;
+    s_busy.t0 = s_busy.stage_t0 = esp_timer_get_time();
+
+    if (s_busy.on) {
+        return;     /* video_start_ui reuses the film's busy window */
+    }
+    s_busy.on = true;
+    s_busy.quit = false;
+    s_busy.dead = false;
+    /* paint one frame right away, BEFORE the animator exists: the card is
+     * visible immediately and two tasks never paint the same window open */
+    void *fb = NULL;
+    app_lcd_get_fb(br.fb_idx, &fb);
+    if (fb != NULL) {
+        draw_busy_frame((uint16_t *)fb);
+        app_lcd_flush(br.fb_idx);
+        br.fb_idx ^= 1;
+    }
+#ifndef CAMOS_UI_PREVIEW
+    if (xTaskCreatePinnedToCore(busy_animator, "busyui", 6144, NULL, 4,
+                                NULL, 0) != pdPASS) {
+        s_busy.on = false;  /* rare: the static frame above is the fallback */
+    }
+#endif
+}
+
+static void busy_stage(const char *txt)
+{
+    if (strncmp(s_busy.stage, txt, sizeof(s_busy.stage)) == 0) {
+        return;     /* same stage: keep the rate accumulator running */
+    }
+    strlcpy(s_busy.stage, txt, sizeof(s_busy.stage));
+    s_busy.extra[0] = '\0';
+    s_busy.acc_bytes = 0;
+    s_busy.prev_done = 0;
+    s_busy.stage_t0 = esp_timer_get_time();
+}
+
+static void busy_bytes(uint32_t done, uint32_t total)
+{
+    /* bytes may restart (probe reads the head, then the moov tail):
+     * accumulate everything that moved through the current stage */
+    uint32_t add = (done >= s_busy.prev_done) ? done - s_busy.prev_done : done;
+    s_busy.acc_bytes += add;
+    s_busy.prev_done = done;
+
+    int64_t dt = esp_timer_get_time() - s_busy.stage_t0;
+    int kbps = 0;
+    if (s_busy.acc_bytes > 1024 && dt > 500000) {
+        kbps = (int)((uint64_t)s_busy.acc_bytes * 1000000ULL /
+                     (uint64_t)dt / 1024ULL);
+    }
+
+    char got[16], tot[16];
+    busy_fmt_kb(got, sizeof(got), done);
+    if (total > 0 && total > done) {
+        busy_fmt_kb(tot, sizeof(tot), total);
+        snprintf(s_busy.extra, sizeof(s_busy.extra), "%s из %s%s%d кБ/с",
+                 got, tot, kbps > 0 ? ", " : "", kbps);
+    } else {
+        snprintf(s_busy.extra, sizeof(s_busy.extra), "%s%s%d кБ/с",
+                 got, kbps > 0 ? ", " : "", kbps);
+    }
+}
+
+static void busy_close(void)
+{
+    if (!s_busy.on) {
+        return;
+    }
+    s_busy.quit = true;
+#ifndef CAMOS_UI_PREVIEW
+    while (!s_busy.dead) {
+        vTaskDelay(pdMS_TO_TICKS(20));  /* animator finishes its last frame */
+    }
+#endif
+    s_busy.on = false;
+}
+
+/* films.c progress -> busy card */
+static void films_prog_cb(void *ctx, films_prog_t st, uint32_t done, uint32_t total)
+{
+    (void)ctx;
+    switch (st) {
+    case FILMS_PROG_SEARCH:
+        busy_stage("ищу в каталоге");
+        break;
+    case FILMS_PROG_METADATA:
+        busy_stage("читаю метаданные");
+        break;
+    case FILMS_PROG_FILE:
+        busy_stage("проверяю файл");    /* no-op when already in this stage */
+        busy_bytes(done, total);
+        break;
+    default:
+        break;
+    }
+}
+
 static void draw_screen(void)
 {
 #if CONFIG_EB_MEDIA_ENABLE
@@ -1435,6 +1710,7 @@ static void draw_screen(void)
     switch (br.state) {
     case ST_SPLASH:   draw_splash(fb);       break;
     case ST_HOME:     draw_home(fb);         break;
+    case ST_BUSY:     draw_busy_frame(fb);   break;
     case ST_LOADING:  draw_loading(fb, "ищем");  break;
     case ST_RESULTS:  draw_results(fb);      break;
     case ST_PAGELOAD: draw_loading(fb, "открываем страницу");    break;
@@ -1462,12 +1738,16 @@ static void do_search(void)
     if (br.query[0] == '\0') {
         return;
     }
-    br.state = ST_LOADING;
-    draw_screen();
+    /* live busy card instead of the old static frame: the animator keeps
+     * redrawing it (ticking seconds) while web_search blocks this task */
+    busy_open("поиск в интернете");
+    busy_stage("жду поисковик");
 
     char *body = NULL;
     size_t len = 0;
     esp_err_t err = web_search(br.query, br.engine_google, &body, &len);
+
+    busy_close();
 
     br.result_count = 0;
     br.serp_error = true;
@@ -1494,12 +1774,14 @@ static void open_result(int idx)
         return;
     }
 
-    br.state = ST_PAGELOAD;
-    draw_screen();
+    busy_open("страница");
+    busy_stage("качаю html");
 
     char *body = NULL;
     size_t len = 0;
     esp_err_t err = web_get(br.results[idx].url, NULL, &body, &len, NULL);
+
+    busy_close();
 
     page_free();
     if (err == ESP_OK && body != NULL) {
@@ -1963,6 +2245,10 @@ void browser_start(void)
 #if CONFIG_EB_ENGINE_GOOGLE
     br.engine_google = true;
 #endif
+#if CONFIG_EB_MEDIA_ENABLE
+    /* films.c stage/byte reports drive the live busy card */
+    films_set_prog_cb(films_prog_cb, NULL);
+#endif
 
     esp_err_t eth_err = app_eth_start();
     if (eth_err != ESP_OK) {
@@ -2051,6 +2337,20 @@ void ui_preview_sd(const char *const *names, const int *video, int n, int err)
         }
     }
     br.state = ST_FILES;
+    draw_screen();
+}
+
+/* Host-only: render the live busy card with the given stage/extra/elapsed */
+void ui_preview_busy(const char *title, const char *stage,
+                     const char *extra, int elapsed_s)
+{
+    memset(&br, 0, sizeof(br));
+    br.fb_idx = 0;
+    br.state = ST_BUSY;
+    strlcpy(s_busy.title, (title != NULL) ? title : "", sizeof(s_busy.title));
+    strlcpy(s_busy.stage, (stage != NULL) ? stage : "", sizeof(s_busy.stage));
+    strlcpy(s_busy.extra, (extra != NULL) ? extra : "", sizeof(s_busy.extra));
+    s_busy.t0 = esp_timer_get_time() - (int64_t)elapsed_s * 1000000LL;
     draw_screen();
 }
 #endif /* CAMOS_UI_PREVIEW */

@@ -131,6 +131,7 @@ films_play_err_t films_resolve(const char *id, char *url, size_t sz)
 { (void)id; (void)url; (void)sz; return FILMS_ERR_NET; }
 films_play_err_t films_probe_url(const char *url, uint16_t *w, uint16_t *h)
 { (void)url; *w = *h = 0; return FILMS_ERR_NET; }
+void films_set_prog_cb(films_prog_fn fn, void *ctx) { (void)fn; (void)ctx; }
 const char *films_err_str(films_play_err_t e) { (void)e; return "ошибка"; }
 
 /* --- preview driver ------------------------------------------------------- */
@@ -140,9 +141,12 @@ extern void ui_preview_set(int st, const char *q, int eng, int scroll,
                            int nres, const char *const *res_titles);
 extern void ui_preview_page(const char *text);
 extern void ui_preview_sd(const char *const *names, const int *video, int n, int err);
+extern void ui_preview_busy(const char *title, const char *stage,
+                            const char *extra, int elapsed_s);
 
 enum { ST_SPLASH = 0, ST_HOME, ST_LOADING, ST_RESULTS, ST_PAGELOAD, ST_PAGE,
-       ST_RADIO, ST_VIDEO, ST_URLIN, ST_VIDEOP, ST_FILES, ST_FILMS, ST_FILMSR };
+       ST_BUSY, ST_RADIO, ST_VIDEO, ST_URLIN, ST_VIDEOP, ST_FILES, ST_FILMS,
+       ST_FILMSR };
 
 static void scene(const char *name)
 {
@@ -238,6 +242,17 @@ int main(void)
 
     scene("12_loading");
     ui_preview_set(ST_LOADING, "", 0, 0, NULL, 0, NULL, 0, NULL);
+
+    /* live busy card (new): the phases a film goes through */
+    scene("13_busy_metadata");
+    ui_preview_busy("1955 - Crashout", "читаю метаданные", "", 4);
+
+    scene("14_busy_probe");
+    ui_preview_busy("1955 - Crashout", "проверяю файл",
+                    "1.4 из 2.9 МБ, 19 кБ/с", 152);
+
+    scene("15_busy_player");
+    ui_preview_busy("видео", "готовлю плеер", "", 187);
 
     printf("rendered %d frames\n", frame_no);
     return 0;
