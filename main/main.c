@@ -13,6 +13,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "sdkconfig.h"
 #include "driver/ledc.h"
 #include "app_lcd.h"
@@ -79,6 +80,14 @@ void app_main(void)
      * Вернуть отладку: menuconfig -> Example Configuration -> Quiet logs = off. */
     esp_log_level_set("*", ESP_LOG_INFO);
 #endif
+
+    /* A brownout reset right after audio starts is the signature of a weak
+     * 5V source sagging under the speaker amp load - tell the user up front. */
+    if (esp_reset_reason() == ESP_RST_BROWNOUT) {
+        ESP_LOGW(TAG, "previous reset: BROWNOUT (power sag). The speaker amp "
+                      "draws sharp current peaks - use a 5V/2A adapter and a "
+                      "short thick USB cable, avoid PC front-panel ports");
+    }
 
     // Initialize the LCD (frame buffers for the browser are cached inside app_lcd)
     ESP_ERROR_CHECK(app_lcd_init(&display_panel));

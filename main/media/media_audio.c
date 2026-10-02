@@ -34,6 +34,14 @@ static const char *TAG = "media_audio";
 #define AU_OUT_BITS     16
 #define AU_OUT_CH       2
 
+/* Linear fade-in at the start of every playback: spreads the speaker amp
+ * current ramp over ~0.4 s instead of a step. The NS4150-class PA draws a
+ * sharp current spike on the first driven samples, which on weak USB power
+ * trips the P4 brownout detector right after the stream reaches PLAYING
+ * (field log 2026-10-02: BOD at the first aud_rate_cvt -> codec write).
+ * It also masks the PA-enable pop. */
+#define AU_FADE_MS      400
+
 static struct {
     bool            inited;
     i2s_chan_handle_t tx;
@@ -44,6 +52,8 @@ static struct {
     esp_codec_dev_handle_t dev;
     bool open;
     bool wr_err;                        /* logged a write failure recently */
+    int  fade_total;                    /* fade-in length in frames */
+    int  fade_left;                     /* frames still to fade */
     int volume;
 } s_au = { .volume = 70 };
 
@@ -228,6 +238,8 @@ esp_err_t media_audio_open(void)
     }
     esp_codec_dev_set_out_vol(s_au.dev, s_au.volume);
     s_au.wr_err = false;
+    s_au.fade_total = AU_FADE_MS * AU_OUT_RATE / 1000;
+    s_au.fade_left = s_au.fade_total;
     s_au.open = true;
     return ESP_OK;
 }
@@ -248,6 +260,17 @@ int media_audio_write(const uint8_t *pcm, int len)
             s_au.wr_err = true;
         }
         return -1;
+    }
+    /* fade-in ramp on the raw 48k/16/stereo frames (in place) */
+    if (s_au.fade_left > 0 && len >= 4 && s_au.fade_total > 0) {
+        int16_t *p = (int16_t *)(void *)pcm;
+        int frames = len / 4;
+        for (int i = 0; i < frames && s_au.fade_left > 0; i++) {
+            int32_t gain = s_au.fade_total - s_au.fade_left;   /* 0..fade_total */
+            p[2 * i]     = (int16_t)((p[2 * i]     * gain) / s_au.fade_total);
+            p[2 * i + 1] = (int16_t)((p[2 * i + 1] * gain) / s_au.fade_total);
+            s_au.fade_left--;
+        }
     }
     int ret = esp_codec_dev_write(s_au.dev, (void *)pcm, len);
     if (ret < 0) {
