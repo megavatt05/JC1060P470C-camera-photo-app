@@ -40,8 +40,8 @@ static const char *TAG = "browser";
 
 #define BAR_H           32      /* top status bar          */
 #define URL_Y           (BAR_H) /* query row               */
-#define URL_H           44
-#define GO_W            96
+#define URL_H           56
+#define GO_W            110
 
 #define CONTENT_Y0      (BAR_H + URL_H + 4)
 #define CONTENT_Y1      368     /* keyboard starts below   */
@@ -204,8 +204,8 @@ static void draw_status_bar(uint16_t *fb)
 static void draw_url_row(uint16_t *fb)
 {
     static const ui_button_t go = {
-        .x = LCD_W - GO_W - 8, .y = URL_Y + 2, .w = GO_W, .h = URL_H - 4,
-        .label = "GO", .id = BTN_GO
+        .x = LCD_W - GO_W - 8, .y = URL_Y + 4, .w = GO_W, .h = URL_H - 8,
+        .label = "GO", .id = BTN_GO, .scale = KB_KEY_SCALE
     };
 
     ui_fill_rect(fb, LCD_W, LCD_H, 0, URL_Y, LCD_W, URL_Y + URL_H, UI_COLOR_BG);
@@ -213,15 +213,15 @@ static void draw_url_row(uint16_t *fb)
              2, UI_COLOR_BORDER);
 
     char fitted[96];
-    ui_text_fit(fitted, sizeof(fitted), br.query, LCD_W - GO_W - 40, UI_SCALE_TEXT);
-    ui_text(fb, LCD_W, LCD_H, 10, URL_Y + (URL_H - UI_FONT_H * UI_SCALE_TEXT) / 2,
-            fitted, UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_BG);
+    ui_text_fit(fitted, sizeof(fitted), br.query, LCD_W - GO_W - 40, UI_SCALE_URL);
+    ui_text(fb, LCD_W, LCD_H, 10, URL_Y + (URL_H - UI_FONT_H * UI_SCALE_URL) / 2,
+            fitted, UI_SCALE_URL, UI_COLOR_FG, UI_COLOR_BG);
 
     /* caret */
-    int cx = 10 + ui_text_width(fitted, UI_SCALE_TEXT) + 2;
+    int cx = 10 + ui_text_width(fitted, UI_SCALE_URL) + 2;
     if ((esp_timer_get_time() / 500000) & 1) {
-        ui_fill_rect(fb, LCD_W, LCD_H, cx, URL_Y + 12, cx + UI_SCALE_TEXT,
-                     URL_Y + URL_H - 12, UI_COLOR_ACCENT);
+        ui_fill_rect(fb, LCD_W, LCD_H, cx, URL_Y + 16, cx + UI_SCALE_URL,
+                     URL_Y + URL_H - 16, UI_COLOR_ACCENT);
     }
 
     ui_button(fb, LCD_W, LCD_H, &go, false);

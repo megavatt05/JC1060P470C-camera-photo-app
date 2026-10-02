@@ -26,6 +26,7 @@ extern "C" {
 
 #define UI_SCALE_TEXT   2   /* body text: 16 px tall */
 #define UI_SCALE_TITLE  3   /* titles:     24 px tall */
+#define UI_SCALE_URL    3   /* query row:  24 px tall */
 #define UI_SCALE_BTN    2
 
 /* RGB565 palette */
