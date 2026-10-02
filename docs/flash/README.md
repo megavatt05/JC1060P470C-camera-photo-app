@@ -24,6 +24,8 @@
 | `flash_COM10.bat` | Автопрошивка на COM10 (esptool, ставится сам) |
 | `FLASH_GUIDE_RU.md` | Полная инструкция + альтернативные способы подключения |
 
+Скачать одним архивом: [Release flash-kit-v1](https://github.com/megavatt05/JC1060P470C-camera-photo-app/releases/tag/flash-kit-v1) (zip, единый образ и форма — файлами).
+
 ## Собрать комплект заново
 
 `scripts/build_web_flasher.py` (в песочнице ассистента) пересобирает HTML-форму
