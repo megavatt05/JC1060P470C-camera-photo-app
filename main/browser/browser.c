@@ -480,10 +480,15 @@ static const struct { const char *name; const char *url; } radio_stations[] = {
 };
 #define RADIO_STATIONS_N (sizeof(radio_stations) / sizeof(radio_stations[0]))
 
+/* Video presets. The SW H264 decoder (esp_h264 / tinyh264) plays only
+ * Constrained Baseline streams: Main/High profiles are rejected at SPS
+ * validation ("H264_DEC: profile_idc is error"). The two clips in media/
+ * are Big Buck Bunny re-encoded to Constrained Baseline (360p lvl3.0,
+ * 480p lvl3.1, AAC-LC, faststart) and served via raw.githubusercontent.com
+ * (supports Range requests). See docs/ETHERNET_BROWSER.md, section "Медиа". */
 static const struct { const char *name; const char *url; } video_presets[] = {
-    { "Big Buck Bunny 360p",  "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4" },
-    { "Big Buck Bunny 720p",  "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4" },
-    { "For Bigger Blazes HD", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4" },
+    { "BBB 360p Baseline", "https://raw.githubusercontent.com/megavatt05/JC1060P470C-camera-photo-app/feature/ethernet-browser/media/bbb_360p_cb.mp4" },
+    { "BBB 480p Baseline", "https://raw.githubusercontent.com/megavatt05/JC1060P470C-camera-photo-app/feature/ethernet-browser/media/bbb_480p_cb.mp4" },
 };
 #define VIDEO_PRESETS_N (sizeof(video_presets) / sizeof(video_presets[0]))
 

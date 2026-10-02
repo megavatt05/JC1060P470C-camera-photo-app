@@ -147,7 +147,43 @@ fallback, если кабель не подключён.
   но в песочнице нет toolchain — проверить `idf.py build` на машине разработчика
   (процедура — docs/BUILD_IDF6.md), затем верифицировать на железе.
 
-## 8. Соглашения
+## 8. Медиа: радио, видео и SD-карта
+
+Радио и видео идут через `esp_player` (GMF-пайплайн): `io_http` → `extractor` →
+декодеры → `aud_render` (ES8311 на I2S0, PA на GPIO11) / видеорендер на RGB-панель.
+Файлы также играются с SD-карты (FAT, монтируется в `/sdcard`).
+
+### Ограничение видеодекодера: только H.264 Constrained Baseline
+
+Видеодекодер — программный (`esp_h264`, ядро tinyh264/h264bsd). Он поддерживает
+**только профиль Baseline (Constrained Baseline)**. Потоки Main/High отбрасываются
+на валидации SPS — в логе это выглядит так:
+
+```
+E H264_DEC: profile_idc is error
+E H264_DEC: Decode sequence parameter set error.
+E H264_DEC.SW: Serious error in decoding, failed to activate param sets
+```
+
+Картинки при этом не будет (аудио-дорожка декодируется отдельным трактом).
+Проверка профиля своего файла: `ffprobe -show_entries stream=profile` — должно
+быть `Constrained Baseline` (или `Baseline`).
+
+Практические следствия:
+
+- большинство публичных тестовых mp4 (test-videos.co.uk, gtv-videos-bucket,
+  W3C-сэмплы) закодированы в **High/Main** — для платы не годятся; именно поэтому
+  первые пресеты видео не играли;
+- в `media/` лежат два перекодированных в Constrained Baseline клипа Big Buck
+  Bunny: 360p (lvl 3.0, ~1.2 МБ) и 480p (lvl 3.1, ~1.7 МБ), AAC-LC 44.1 кГц,
+  faststart; пресеты видео в `browser.c` ссылаются на них через
+  `raw.githubusercontent.com` (Range-запросы поддерживаются);
+- перекодирование своих файлов:
+  `ffmpeg -i src.mp4 -c:v libx264 -profile:v baseline -level 3.1 -pix_fmt yuv420p -c:a aac -movflags +faststart out.mp4`;
+- разумный потолок для плавного софтового декода на P4 — 480p@30; 720p и выше,
+  скорее всего, не поспевают по CPU.
+
+## 9. Соглашения
 
 - Коммиты: `feat(browser): ...`, `fix(browser): ...`, `docs(browser): ...`.
 - Ничего не ломаем в камере: без `APP_ENABLE_ETHERNET_BROWSER` (menuconfig)
