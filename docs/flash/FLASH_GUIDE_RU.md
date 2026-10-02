@@ -1,7 +1,7 @@
 # Прошивка ESP32-P4 через COM-порт — полная инструкция
 
 Плата: **JC1060P470C** (ESP32-P4, 1024×600, Ethernet IP101)
-Прошивка: **cambrowser 7ab5082** — браузер + видео + ФИЛЬМЫ + friendly-интерфейс v2 + фикс SD/LDO.
+Прошивка: **cambrowser 4ceff05** — браузер + видео + ФИЛЬМЫ + friendly-интерфейс v2 + фикс SD/LDO.
 
 ## Короткая памятка (TL;DR)
 
@@ -41,7 +41,7 @@
 
 1. Откройте https://espressif.github.io/esp-launchpad/ в Chrome/Edge.
 2. CONNECT → COM10 → вкладка **Flash** → Add File:
-   `cambrowser_p4_7ab5082_full.bin`, адрес **0x0** → FLASH.
+   `cambrowser_p4_4ceff05_full.bin`, адрес **0x0** → FLASH.
 
 ## 5. Способ 3 — flash_COM10.bat (без браузера)
 

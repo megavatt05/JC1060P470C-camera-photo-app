@@ -1,7 +1,7 @@
 @echo off
 setlocal
 REM ============================================================
-REM  ESP32-P4 (JC1060P470C) - cambrowser firmware 7ab5082
+REM  ESP32-P4 (JC1060P470C) - cambrowser firmware 4ceff05
 REM  Flash kit prepared from verified CI build (esp32p4-binaries)
 REM  Port: COM10   Baud: 921600
 REM ============================================================
@@ -9,7 +9,7 @@ set PORT=COM10
 set BAUD=921600
 cd /d "%~dp0"
 
-echo === ESP32-P4: flashing cambrowser (commit 7ab5082) to %PORT% ===
+echo === ESP32-P4: flashing cambrowser (commit 4ceff05) to %PORT% ===
 echo.
 
 where esptool >nul 2>nul
