@@ -17,6 +17,11 @@ extern "C" {
  * Shared with the CamBrowser UI (camos/ui.c). */
 extern const uint8_t app_overlay_font8x8[95][8];
 
+/* Cyrillic glyph table (same 8x8/LSB format), generated from DejaVu Sans
+ * Mono. Index 0..31 = U+0410..U+042F (А..Я), 32..63 = U+0430..U+044F
+ * (а..я), 64 = U+0401 (Ё), 65 = U+0451 (ё). Shared with camos/ui.c. */
+extern const uint8_t app_overlay_font8x8_cyr[66][8];
+
 /**
  * @brief Draw the FPS readout into an RGB565 LCD frame buffer.
  *

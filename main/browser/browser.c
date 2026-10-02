@@ -89,6 +89,7 @@ static struct {
 
     char query[96];
     bool engine_google;
+    bool kb_ru;             /* on-screen keyboard layout: false=EN true=RU */
 
     web_result_t results[WEB_RESULTS_MAX];
     int result_count;
@@ -130,8 +131,14 @@ static void page_wrap(void)
             if (*p == ' ') {
                 last_space = p;
             }
+            if ((((unsigned char)*p) & 0xC0) != 0x80) {
+                col++;          /* count codepoints, not UTF-8 bytes */
+            }
             p++;
-            col++;
+        }
+        /* never split a UTF-8 sequence at the wrap boundary */
+        while (p > line_start && (((unsigned char)*p) & 0xC0) == 0x80) {
+            p--;
         }
 
         if (*p == '\n') {
@@ -255,49 +262,87 @@ static bool urlrow_go_hit(int x, int y)
 
 /* --- Keyboard ---------------------------------------------------------------- */
 
-static const char *KB_ROWS[] = {
-    "1234567890-",
-    "qwertyuiop",
-    "asdfghjkl.",
-    "zxcvbnm_/",
-};
+/* Keys are Unicode codepoints: ASCII prints as-is, Cyrillic (U+0410..)
+ * is UTF-8 encoded by query_append_cp() and rendered with the Cyrillic
+ * glyph table in app_overlay_font8x8_cyr. 0 terminates a row. */
+
 #define KB_ROWS_NUM 4
+#define KB_ROW_MAX  13
+
+static const uint32_t KB_EN[KB_ROWS_NUM][KB_ROW_MAX] = {
+    { '1','2','3','4','5','6','7','8','9','0','-','_', 0 },
+    { 'q','w','e','r','t','y','u','i','o','p', 0 },
+    { 'a','s','d','f','g','h','j','k','l','.', 0 },
+    { 'z','x','c','v','b','n','m','_','/', 0 },
+};
+
+/* ЙЦУКЕН: ё on the digit row, standard letter rows, '.'/"/" kept */
+static const uint32_t KB_RU[KB_ROWS_NUM][KB_ROW_MAX] = {
+    { 0x0451,'1','2','3','4','5','6','7','8','9','0','-', 0 },
+    { 0x0439,0x0446,0x0443,0x043A,0x0435,0x043D,0x0433,0x0448,0x0449,0x0437,0x0445,0x044A, 0 },
+    { 0x0444,0x044B,0x0432,0x0430,0x043F,0x0440,0x043E,0x043B,0x0434,0x0436,0x044D, 0 },
+    { 0x044F,0x0447,0x0441,0x043C,0x0438,0x0442,0x044C,0x0431,0x044E,'.', 0 },
+};
+
+static const uint32_t (*kb_rows(void))[KB_ROW_MAX]
+{
+    return br.kb_ru ? KB_RU : KB_EN;
+}
+
+/* UTF-8 encode one key codepoint into buf (3 bytes); returns byte length */
+static int kb_key_label(uint32_t cp, char *buf)
+{
+    if (cp < 0x80) {
+        buf[0] = (char)cp;
+        buf[1] = '\0';
+        return 1;
+    }
+    buf[0] = (char)(0xC0 | (cp >> 6));
+    buf[1] = (char)(0x80 | (cp & 0x3F));
+    buf[2] = '\0';
+    return 2;
+}
 
 static void draw_keyboard(uint16_t *fb)
 {
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y1, LCD_W, LCD_H, 0x0000);
 
+    const uint32_t (*rows)[KB_ROW_MAX] = kb_rows();
     int y = CONTENT_Y1 + 4;
     for (int r = 0; r < KB_ROWS_NUM; r++) {
-        const char *row = KB_ROWS[r];
-        int row_w = (int)strlen(row) * KEY_W + ((int)strlen(row) - 1) * KEY_GAP;
+        int n = 0;
+        while (n < KB_ROW_MAX && rows[r][n] != 0) {
+            n++;
+        }
+        int row_w = n * KEY_W + (n - 1) * KEY_GAP;
         int x = (LCD_W - row_w) / 2;
 
-        for (const char *c = row; *c != '\0'; c++, x += KEY_W + KEY_GAP) {
+        for (int k = 0; k < n; k++, x += KEY_W + KEY_GAP) {
+            char lab[3];
+            kb_key_label(rows[r][k], lab);
             ui_button_t key = { .x = x, .y = y, .w = KEY_W, .h = KEY_H,
-                                .label = NULL, .id = (int)*c };
-            char lab[2] = { *c, 0 };
-            key.label = lab;
+                                .label = lab, .id = (int)rows[r][k] };
             ui_button(fb, LCD_W, LCD_H, &key, false);
         }
         y += KEY_H + 4;
     }
 
-    /* bottom row: SPC / DEL / engine / GO */
+    /* bottom row: SPC / DEL / EN|RU / engine / GO */
     struct { int w; const char *label; int id; } bottom[] = {
         { 160, "SPC",   BTN_SPC },
         { 96,  "DEL",   BTN_DEL },
+        { 96,  br.kb_ru ? "RU" : "EN", BTN_KBD },
         { 128, br.engine_google ? "GGL" : "DDG", BTN_ENGINE },
         { 128, "GO",    BTN_GO },
     };
     int total = 0;
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < 5; i++) {
         total += bottom[i].w;
     }
-    total += 3 * KEY_GAP;
+    total += 4 * KEY_GAP;
 
     int x = (LCD_W - total) / 2;
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < 5; i++) {
         ui_button_t key = { .x = x, .y = y, .w = bottom[i].w, .h = KEY_H,
                             .label = bottom[i].label, .id = bottom[i].id };
         ui_button(fb, LCD_W, LCD_H, &key, false);
@@ -305,23 +350,27 @@ static void draw_keyboard(uint16_t *fb)
     }
 }
 
-/* Returns BTN_* id or 0 when the tap hit nothing */
+/* Returns BTN_* id or the key codepoint (>= BTN_CHAR), or 0 on a miss */
 static int keyboard_hit(int x, int y)
 {
     if (y < CONTENT_Y1) {
         return BTN_NONE;
     }
 
+    const uint32_t (*rows)[KB_ROW_MAX] = kb_rows();
     int ky = CONTENT_Y1 + 4;
     for (int r = 0; r < KB_ROWS_NUM; r++) {
-        const char *row = KB_ROWS[r];
-        int row_w = (int)strlen(row) * KEY_W + ((int)strlen(row) - 1) * KEY_GAP;
+        int n = 0;
+        while (n < KB_ROW_MAX && rows[r][n] != 0) {
+            n++;
+        }
+        int row_w = n * KEY_W + (n - 1) * KEY_GAP;
         int kx = (LCD_W - row_w) / 2;
 
         if (y >= ky && y < ky + KEY_H) {
-            for (const char *c = row; *c != '\0'; c++, kx += KEY_W + KEY_GAP) {
+            for (int k = 0; k < n; k++, kx += KEY_W + KEY_GAP) {
                 if (x >= kx && x < kx + KEY_W) {
-                    return (int)*c;
+                    return (int)rows[r][k];
                 }
             }
             return BTN_NONE;
@@ -332,18 +381,19 @@ static int keyboard_hit(int x, int y)
     struct { int w; const char *label; int id; } bottom[] = {
         { 160, "SPC",   BTN_SPC },
         { 96,  "DEL",   BTN_DEL },
+        { 96,  br.kb_ru ? "RU" : "EN", BTN_KBD },
         { 128, br.engine_google ? "GGL" : "DDG", BTN_ENGINE },
         { 128, "GO",    BTN_GO },
     };
     int total = 0;
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < 5; i++) {
         total += bottom[i].w;
     }
-    total += 3 * KEY_GAP;
+    total += 4 * KEY_GAP;
     int x0 = (LCD_W - total) / 2;
 
     if (y >= ky && y < ky + KEY_H) {
-        for (size_t i = 0; i < 4; i++) {
+        for (size_t i = 0; i < 5; i++) {
             if (x >= x0 && x < x0 + bottom[i].w) {
                 return bottom[i].id;
             }
@@ -460,6 +510,10 @@ static void draw_page(uint16_t *fb)
         }
         memcpy(buf, br.lines[li].s, len);
         buf[len] = '\0';
+        /* never cut a UTF-8 sequence at the buffer boundary */
+        while (len > 0 && (((unsigned char)buf[len]) & 0xC0) == 0x80) {
+            buf[--len] = '\0';
+        }
         ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + i * LINE_H, buf,
                 UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_BG);
     }
@@ -565,12 +619,15 @@ static void open_result(int idx)
     draw_screen();
 }
 
-static void query_append(char c)
+/* Append one key codepoint (ASCII or Cyrillic) as UTF-8 */
+static void query_append_cp(uint32_t cp)
 {
+    char utf8[3];
+    int n = kb_key_label(cp, utf8);
     size_t len = strlen(br.query);
-    if (len + 1 < sizeof(br.query)) {
-        br.query[len] = c;
-        br.query[len + 1] = '\0';
+    if (len + n < sizeof(br.query)) {
+        memcpy(br.query + len, utf8, n);
+        br.query[len + n] = '\0';
     }
 }
 
@@ -613,12 +670,21 @@ static void browser_task(void *arg)
                 int id = (urlrow_go_hit(tap_x, tap_y) && br.query[0] != '\0')
                          ? BTN_GO : keyboard_hit(tap_x, tap_y);
                 if (id >= BTN_CHAR) {
-                    query_append((char)id);
+                    query_append_cp((uint32_t)id);
                     draw_screen();
                 } else {
                     switch (id) {
+                    case BTN_KBD:
+                        br.kb_ru = !br.kb_ru;
+                        draw_screen();
+                        break;
                     case BTN_DEL: {
+                        /* strip one whole UTF-8 codepoint, not one byte */
                         size_t len = strlen(br.query);
+                        while (len > 0 &&
+                               (((unsigned char)br.query[len - 1]) & 0xC0) == 0x80) {
+                            len--;
+                        }
                         if (len > 0) {
                             br.query[len - 1] = '\0';
                         }
@@ -626,7 +692,7 @@ static void browser_task(void *arg)
                         break;
                     }
                     case BTN_SPC:
-                        query_append(' ');
+                        query_append_cp(' ');
                         draw_screen();
                         break;
                     case BTN_ENGINE:

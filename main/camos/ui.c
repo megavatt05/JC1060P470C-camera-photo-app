@@ -15,6 +15,38 @@
 #include "app_overlay.h"
 #include "camos/ui.h"
 
+/* Decode one UTF-8 codepoint at p (NUL-safe). Advances *pp past the whole
+ * sequence. Returns the codepoint, or -1 for an invalid/overlong sequence
+ * (caller draws '?'). Only ASCII (1 byte) and Cyrillic-range 2-byte
+ * sequences matter for the current font; 3/4-byte sequences are skipped
+ * whole so a single char becomes exactly one '?'. */
+static int ui_utf8_next(const char **pp)
+{
+    const unsigned char *p = (const unsigned char *)(*pp);
+    unsigned char c = p[0];
+
+    if (c < 0x80) {
+        (*pp)++;
+        return c;
+    }
+    if ((c & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+        int cp = ((c & 0x1F) << 6) | (p[1] & 0x3F);
+        *pp += 2;
+        return cp;
+    }
+    if ((c & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+        *pp += 3;
+        return -1;
+    }
+    if ((c & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 &&
+        (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+        *pp += 4;
+        return -1;
+    }
+    (*pp)++;
+    return -1;
+}
+
 void ui_fill_rect(uint16_t *fb, int fb_w, int fb_h,
                   int x0, int y0, int x1, int y1, uint16_t color)
 {
@@ -51,7 +83,12 @@ int ui_text_width(const char *s, int scale)
     if (s == NULL) {
         return 0;
     }
-    return (int)strlen(s) * UI_FONT_W * scale;
+    int n = 0;
+    for (const char *p = s; *p != '\0'; ) {
+        ui_utf8_next(&p);
+        n++;
+    }
+    return n * UI_FONT_W * scale;
 }
 
 int ui_text(uint16_t *fb, int fb_w, int fb_h,
@@ -65,13 +102,24 @@ int ui_text(uint16_t *fb, int fb_w, int fb_h,
     int char_step = UI_FONT_W * scale;
     int glyph_h = UI_FONT_H * scale;
 
-    for (const char *p = s; *p != '\0'; p++, x += char_step) {
+    for (const char *p = s; *p != '\0'; x += char_step) {
         if (x + char_step <= 0 || x >= fb_w || y + glyph_h <= 0 || y >= fb_h) {
             continue; /* whole glyph outside the canvas */
         }
 
-        int idx = (*p >= 0x20 && *p <= 0x7E) ? (*p - 0x20) : ('?' - 0x20);
-        const uint8_t *glyph = app_overlay_font8x8[idx];
+        int cp = ui_utf8_next(&p);
+        const uint8_t *glyph;
+        if (cp >= 0x20 && cp <= 0x7E) {
+            glyph = app_overlay_font8x8[cp - 0x20];
+        } else if (cp >= 0x0410 && cp <= 0x044F) {
+            glyph = app_overlay_font8x8_cyr[cp - 0x0410];   /* А..Я, а..я */
+        } else if (cp == 0x0401) {
+            glyph = app_overlay_font8x8_cyr[64];            /* Ё */
+        } else if (cp == 0x0451) {
+            glyph = app_overlay_font8x8_cyr[65];            /* ё */
+        } else {
+            glyph = app_overlay_font8x8['?' - 0x20];
+        }
 
         for (int row = 0; row < UI_FONT_H; row++) {
             int py = y + row * scale;
@@ -96,17 +144,28 @@ int ui_text_fit(char *out, size_t out_size, const char *s, int max_px, int scale
     if (max_chars > max_px / step) {
         max_chars = max_px / step;
     }
-    int len = (int)strlen(s);
-    if (len <= max_chars) {
-        snprintf(out, out_size, "%s", s);
-        return len;
+
+    /* Byte length of the first max_chars UTF-8 codepoints */
+    int len = 0, chars = 0;
+    while (s[len] != '\0' && chars < max_chars && len + 4 < (int)out_size) {
+        const char *q = s + len;
+        ui_utf8_next(&q);
+        len = (int)(q - s);
+        chars++;
     }
-    if (max_chars < 3) {
+    if (s[len] == '\0') {
+        memcpy(out, s, len);
+        out[len] = '\0';
+        return chars;
+    }
+    if (max_chars < 3 || len + 3 > (int)out_size) {
         out[0] = '\0';
         return 0;
     }
-    snprintf(out, out_size, "%.*s..", max_chars - 2, s);
-    return max_chars;
+    memcpy(out, s, len);
+    out[len] = '\0';
+    strcat(out, "..");
+    return chars;
 }
 
 void ui_box_text(uint16_t *fb, int fb_w, int fb_h,

@@ -36,10 +36,58 @@ static const char *ci_strstr(const char *hay, const char *needle)
     return NULL;
 }
 
+/* Copy one well-formed UTF-8 sequence at p into dst+o. Returns the number
+ * of bytes copied (== consumed), 0 when p is not valid UTF-8 or out of
+ * room - the caller then writes its non-ASCII placeholder. */
+static int utf8_take(const char *p, char *dst, size_t dst_size, size_t o)
+{
+    unsigned char c0 = (unsigned char)p[0];
+    int seq;
+    if ((c0 & 0xE0) == 0xC0) {
+        seq = 2;
+    } else if ((c0 & 0xF0) == 0xE0) {
+        seq = 3;
+    } else if ((c0 & 0xF8) == 0xF0) {
+        seq = 4;
+    } else {
+        return 0;
+    }
+    for (int i = 1; i < seq; i++) {
+        if ((((unsigned char)p[i]) & 0xC0) != 0x80) {
+            return 0;
+        }
+    }
+    if (o + seq + 1 > dst_size) {
+        return 0;
+    }
+    memcpy(dst + o, p, seq);
+    return seq;
+}
+
+/* Encode a Unicode codepoint as UTF-8 into out (>= 4 bytes); returns the
+ * byte count, 0 for surrogates and out-of-range codes. */
+static int utf8_put(long code, char *out)
+{
+    if (code >= 0x80 && code <= 0x7FF) {
+        out[0] = (char)(0xC0 | (code >> 6));
+        out[1] = (char)(0x80 | (code & 0x3F));
+        return 2;
+    }
+    if (code >= 0x800 && code <= 0xFFFF &&
+        !(code >= 0xD800 && code <= 0xDFFF)) {
+        out[0] = (char)(0xE0 | (code >> 12));
+        out[1] = (char)(0x80 | ((code >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (code & 0x3F));
+        return 3;
+    }
+    return 0;
+}
+
 /* Decode a small set of named entities plus numeric references.
- * Advances *pp past the entity; returns the decoded char (or '?' for
- * anything we cannot render with the ASCII font). */
-static char decode_entity(const char **pp)
+ * Advances *pp past the entity, writes 1..3 UTF-8 bytes into out (>= 4
+ * bytes) and returns the count. Numeric refs outside the font become
+ * '?' - one per character, not one per UTF-8 byte. */
+static int decode_entity(const char **pp, char *out)
 {
     const char *p = *pp;    /* p points at '&' */
     static const struct { const char *name; char ch; } named[] = {
@@ -67,29 +115,39 @@ static char decode_entity(const char **pp)
         if (digits > 0 && semi != NULL) {
             *pp = semi + 1;
             if (code >= 0x20 && code <= 0x7E) {
-                return (char)code;
+                out[0] = (char)code;
+                return 1;
             }
-            return '?';
+            int n = utf8_put(code, out);
+            if (n > 0) {
+                return n;
+            }
+            out[0] = '?';
+            return 1;
         }
         *pp = p + 1;
-        return '&';
+        out[0] = '&';
+        return 1;
     }
 
     for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
         size_t nlen = strlen(named[i].name);
         if (strncasecmp(p + 1, named[i].name, nlen) == 0) {
             *pp = p + 1 + nlen;
-            return named[i].ch;
+            out[0] = named[i].ch;
+            return 1;
         }
     }
 
     const char *semi = strchr(p, ';');
     if (semi != NULL && semi - p < 12) {
         *pp = semi + 1;
-        return '?';     /* named entity we do not render */
+        out[0] = '?';     /* named entity we do not render */
+        return 1;
     }
     *pp = p + 1;
-    return '&';
+    out[0] = '&';
+    return 1;
 }
 
 /* Copy text, stripping tags and decoding entities, collapsing whitespace.
@@ -111,12 +169,17 @@ static size_t copy_visible(const char *begin, const char *end,
             continue;
         }
         if (*p == '&') {
-            char c = decode_entity(&p);
-            if (c == ' ' && space) {
+            char ent[4];
+            int n = decode_entity(&p, ent);
+            if (o + n + 1 >= dst_size) {
+                break;
+            }
+            if (n == 1 && ent[0] == ' ' && space) {
                 continue;
             }
-            dst[o++] = c;
-            space = (c == ' ');
+            memcpy(dst + o, ent, n);
+            o += n;
+            space = (n == 1 && ent[0] == ' ');
             continue;
         }
         if (isspace((unsigned char)*p)) {
@@ -129,11 +192,19 @@ static size_t copy_visible(const char *begin, const char *end,
         }
         if (*p >= 0x20 && *p <= 0x7E) {
             dst[o++] = *p;
+            space = false;
+            p++;
+            continue;
+        }
+        int n = utf8_take(p, dst, dst_size, o);
+        if (n > 0) {
+            o += n;
+            p += n;
         } else {
-            dst[o++] = '?';     /* non-ASCII placeholder */
+            dst[o++] = '?';     /* invalid byte */
+            p++;
         }
         space = false;
-        p++;
     }
 
     while (o > 0 && dst[o - 1] == ' ') {
@@ -459,7 +530,13 @@ esp_err_t html_to_text(char *html, char *out, size_t out_size)
             continue;
         }
         if (*p == '&') {
-            out[o++] = decode_entity(&p);
+            char ent[4];
+            int n = decode_entity(&p, ent);
+            if (o + n + 1 >= out_size) {
+                break;
+            }
+            memcpy(out + o, ent, n);
+            o += n;
             continue;
         }
         if (*p == '\n') {
@@ -476,8 +553,19 @@ esp_err_t html_to_text(char *html, char *out, size_t out_size)
             p++;
             continue;
         }
-        out[o++] = (*p >= 0x20 && *p <= 0x7E) ? *p : '?';
-        p++;
+        if (*p >= 0x20 && *p <= 0x7E) {
+            out[o++] = *p;
+            p++;
+            continue;
+        }
+        int n = utf8_take(p, out, out_size, o);
+        if (n > 0) {
+            o += n;
+            p += n;
+        } else {
+            out[o++] = '?';     /* non-ASCII placeholder */
+            p++;
+        }
     }
 
     /* Trim trailing spaces/newlines */
