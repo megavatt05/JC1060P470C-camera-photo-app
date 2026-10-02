@@ -22,25 +22,6 @@ static const char *TAG = "app_main";
 
 static esp_lcd_panel_handle_t display_panel;
 
-void app_main(void)
-{
-#if CONFIG_EXAMPLE_QUIET_LOGS
-    /* Защита от "залипшего" sdkconfig: sdkconfig.defaults применяется только
-     * при пересоздании sdkconfig. Принудительно ставим INFO до любой
-     * инициализации, чтобы поведение не зависело от состояния sdkconfig.
-     * Вернуть отладку: menuconfig -> Example Configuration -> Quiet logs = off. */
-    esp_log_level_set("*", ESP_LOG_INFO);
-#endif
-
-    // Initialize the LCD (frame buffers for the browser are cached inside app_lcd)
-    ESP_ERROR_CHECK(app_lcd_init(&display_panel));
-
-    bsp_display_backlight_on();
-
-    ESP_LOGI(TAG, "starting CamBrowser (standalone, no camera)");
-    browser_start();
-}
-
 #define BSP_LCD_BACKLIGHT   GPIO_NUM_23
 #define LCD_LEDC_CH         LEDC_CHANNEL_0
 static esp_err_t bsp_display_brightness_init(void)
@@ -87,4 +68,24 @@ static esp_err_t bsp_display_brightness_set(int brightness_percent)
 static esp_err_t bsp_display_backlight_on(void)
 {
     return bsp_display_brightness_set(100);
+}
+
+void app_main(void)
+{
+#if CONFIG_EXAMPLE_QUIET_LOGS
+    /* Защита от "залипшего" sdkconfig: sdkconfig.defaults применяется только
+     * при пересоздании sdkconfig. Принудительно ставим INFO до любой
+     * инициализации, чтобы поведение не зависело от состояния sdkconfig.
+     * Вернуть отладку: menuconfig -> Example Configuration -> Quiet logs = off. */
+    esp_log_level_set("*", ESP_LOG_INFO);
+#endif
+
+    // Initialize the LCD (frame buffers for the browser are cached inside app_lcd)
+    ESP_ERROR_CHECK(app_lcd_init(&display_panel));
+
+    ESP_ERROR_CHECK(bsp_display_brightness_init());
+    bsp_display_backlight_on();
+
+    ESP_LOGI(TAG, "starting CamBrowser (standalone, no camera)");
+    browser_start();
 }
