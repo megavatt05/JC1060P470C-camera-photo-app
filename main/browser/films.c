@@ -21,11 +21,15 @@
 
 static const char *TAG = "films";
 
-#define MOOV_MAX        (12u << 20) /* 12 MB, transient SPIRAM alloc freed right
-                                     * after inspection; 4 MB tripped on real
-                                     * files (560 MB remuxes carry 4+ MB of
-                                     * stsz/stco/ctts tables) */
-#define FIRST_CHUNK     (64 * 1024)
+/* Sanity cap for the moov box size taken from its header. The probe never
+ * downloads the moov wholesale any more (lazy window walk below), so this
+ * is only a guard against garbage headers, not a download budget - 64 MB
+ * covers any real index (a 2 h film carries a 3-5 MB moov). */
+#define MOOV_SANITY_MAX (64u << 20)
+/* Sliding read window for the box walk: headers of the descent path plus
+ * the stsd cluster live within a few dozen KB around each box, so one
+ * 64 KB Range read usually serves the whole video-trak descent. */
+#define PROBE_WINDOW    (64 * 1024)
 
 /* progress callback (see films.h): lets the UI animate a busy card while
  * these calls block for seconds to minutes */
@@ -486,7 +490,10 @@ static int range_read(const char *url, uint64_t offset,
 {
     esp_http_client_config_t cfg = {
         .url = url,
-        .buffer_size = 4096,
+        /* 32 KB: the transport reads at most buffer_size per recv, and a
+         * 4 KB window on a ~200 ms RTT path capped the stream at ~20 kB/s
+         * (a whole-moov probe download took minutes at that rate). */
+        .buffer_size = 32 * 1024,
         .buffer_size_tx = 2048,
         .timeout_ms = 20000,
         .max_redirection_count = 10,
@@ -548,173 +555,327 @@ static int range_read(const char *url, uint64_t offset,
     return got;
 }
 
-/* find a child box by type in [buf, buf+size); buf must point INSIDE the
- * container (past its own 8-byte header); returns offset relative to buf */
-static int64_t find_box(const uint8_t *buf, size_t size, uint32_t type)
+/* ------------------------------------------------------------------ */
+/* Lazy box walk over the remote file                                 */
+/*                                                                    */
+/* The old probe downloaded the WHOLE moov (3-5 MB on real films =    */
+/* minutes at archive.org node speeds) just to reach avcC a few       */
+/* hundred bytes past its start. The walk now reads every box header  */
+/* on demand: moov/trak/mdia/minf/stbl children are skipped by size,  */
+/* only the descent path (hdlr, stsd, avcC, ctts) is actually fetched. */
+/* Reads are served from a sliding 64 KB window; a read outside it    */
+/* slides the window with one Range request.                          */
+/* ------------------------------------------------------------------ */
+
+static inline uint32_t fourcc(const char *s)
 {
-    size_t off = 0;
-    while (off + 8 <= size) {
-        uint64_t sz = be32(buf + off);
-        size_t hdr = 8;
-        if (sz == 1) {
-            if (off + 16 > size) {
-                break;
-            }
-            sz = be64(buf + off + 8);
-            hdr = 16;
-        } else if (sz == 0) {
-            sz = size - off;
-        }
-        if (sz < hdr || off + sz > size) {
-            break;
-        }
-        if (box_type(buf + off) == type) {
-            return (int64_t)off;
-        }
-        off += sz;
-    }
-    return -1;
+    return ((uint32_t)(uint8_t)s[0] << 24) | ((uint32_t)(uint8_t)s[1] << 16) |
+           ((uint32_t)(uint8_t)s[2] << 8) | (uint32_t)(uint8_t)s[3];
 }
 
-/* inspect stbl -> stsd of one video trak */
-static films_play_err_t stsd_inspect(const uint8_t *stbl, size_t stbl_size,
-                                     uint16_t *out_w, uint16_t *out_h)
+typedef struct {
+    const char *url;
+    uint8_t    *win;        /* window contents                     */
+    uint64_t    win_base;   /* file offset of win[0]               */
+    size_t      win_len;    /* valid bytes in the window           */
+    bool        saw_200;    /* a read got 200 - server ignored Range */
+} lazy_reader_t;
+
+/* Copy len bytes at file offset off into dst. Served from the window when
+ * possible; otherwise the window slides to off with one Range read. Returns
+ * false on a short read (EOF or transport failure). */
+static bool lazy_read(lazy_reader_t *r, uint64_t off, void *dst, size_t len)
 {
-    /* stbl points at the stbl box header: search inside its body */
-    int64_t stsd = find_box(stbl + 8, stbl_size - 8, be32((const uint8_t *)"stsd"));
-    if (stsd < 0) {
-        return FILMS_ERR_NO_VIDEO;
+    if (len != 0 && off >= r->win_base &&
+        off + len <= r->win_base + r->win_len) {
+        memcpy(dst, r->win + (size_t)(off - r->win_base), len);
+        return true;
     }
-    const uint8_t *s = stbl + 8 + stsd;
-    size_t sz = be32(s);
-    if (sz < 24 || sz > stbl_size - 8 - stsd) {
-        return FILMS_ERR_NO_VIDEO;
+    bool strict = true;
+    int got = range_read(r->url, off, r->win, PROBE_WINDOW, &strict);
+    if (!strict) {
+        r->saw_200 = true;
     }
-    const uint8_t *entry = s + 16;  /* version/flags(4) + entry_count(4) */
-    size_t esz = be32(entry);
-    if (esz < 24 || entry + esz > s + sz) {
-        return FILMS_ERR_NO_VIDEO;
+    if (got < (int)len) {
+        return false;
     }
-    uint32_t type = box_type(entry);
-    const uint8_t *p = entry + 8;
-    size_t plen = esz - 8;
+    r->win_base = off;
+    r->win_len  = (size_t)got;
+    memcpy(dst, r->win, len);
+    return true;
+}
 
-    if (type == be32((const uint8_t *)"hvc1") ||
-        type == be32((const uint8_t *)"hev1")) {
-        return FILMS_ERR_NOT_H264;      /* HEVC */
-    }
-    if (type != be32((const uint8_t *)"avc1") &&
-        type != be32((const uint8_t *)"avc2") &&
-        type != be32((const uint8_t *)"avc3") &&
-        type != be32((const uint8_t *)"avc4")) {
-        return FILMS_ERR_NOT_H264;      /* mpeg4-asp / unknown */
-    }
+typedef struct {
+    uint64_t size;      /* full box size incl. header             */
+    uint32_t type;      /* fourcc, big-endian as stored in file   */
+    size_t   hdr;       /* header length (8, or 16 for largesize) */
+} box_hdr_t;
 
-    if (plen >= 28) {
-        *out_w = be16_at(p + 24);
-        *out_h = be16_at(p + 26);
+/* Read a box header at off. Returns false on a short read or a nonsense
+ * header (size 0 "extends to EOF" and size < header length included). */
+static bool box_hdr_at(lazy_reader_t *r, uint64_t off, box_hdr_t *b)
+{
+    uint8_t h[16];
+    if (!lazy_read(r, off, h, 8)) {
+        return false;
     }
-
-    /* avcC sits among the child boxes after the 78-byte sample entry head */
-    const uint8_t *end = p + plen;
-    const uint8_t *q = (plen > 78) ? p + 78 : end;
-    while (q + 8 <= end) {
-        uint32_t csz = be32(q);
-        if (csz < 8 || q + csz > end) {
-            break;
+    b->hdr  = 8;
+    b->size = be32(h);
+    b->type = be32(h + 4);
+    if (b->size == 1) {
+        if (!lazy_read(r, off + 8, h, 8)) {
+            return false;
         }
-        if (box_type(q) == be32((const uint8_t *)"avcC") && csz >= 12) {
-            uint8_t profile = q[8 + 1];     /* payload: ver, profile, cflags, level */
-            ESP_LOGI(TAG, "avcC: profile=%u constraint=0x%02x level=%u",
-                     profile, q[8 + 2], q[8 + 3]);
-            return (profile == 66) ? FILMS_PLAY_OK : FILMS_ERR_HIGH_PROFILE;
-        }
-        q += csz;
+        b->size = be64(h);
+        b->hdr  = 16;
     }
-    /* avc1 without avcC (or avc3 with in-band SPS/PPS): profile unknown,
-     * the SW decoder rejects anything but 66 - fail safe */
+    return b->size >= b->hdr;
+}
+
+/* H.264 gate for the h264bsd SW decoder (esp_h264_dec_sw):
+ *  - Baseline (66): decodes - status quo, what plays today keeps playing;
+ *  - Main (77): decodable when constraint_set1 is set - the stream is then
+ *    restricted to Baseline tools (CAVLC, no B-slices). h264bsd itself does
+ *    not look at profile_idc (its SPS parser only prints a debug note) and
+ *    rejects CABAC in the PPS parse, so constrained-Main streams play.
+ *    B-frames are guarded via the ctts box: non-zero composition offsets
+ *    exist only when pts != dts (B-frames) - cheap protection against
+ *    encoders that set constraint_set1 sloppily;
+ *  - everything else (High, Main without constraint_set1): rejected here
+ *    with a readable reason instead of failing mid-playback. */
+static films_play_err_t profile_verdict(uint8_t profile, uint8_t cflags,
+                                        bool has_bframes)
+{
+    if (profile == 66) {
+        return FILMS_PLAY_OK;
+    }
+    if (profile == 77 && (cflags & 0x40) && !has_bframes) {
+        return FILMS_PLAY_OK;
+    }
     return FILMS_ERR_HIGH_PROFILE;
 }
 
-static films_play_err_t moov_inspect(const uint8_t *moov, size_t size,
-                                     uint16_t *out_w, uint16_t *out_h)
+/* Inspect one stbl: scan its children for ctts (B-frame marker) and stsd,
+ * then parse the first sample entry + avcC. Lazy: only the 8-byte ctts
+ * head and the stsd/avcC payloads are fetched. */
+static films_play_err_t stbl_inspect(lazy_reader_t *r, uint64_t stbl_off,
+                                     uint64_t stbl_size, uint16_t *out_w,
+                                     uint16_t *out_h)
 {
-    size_t off = 8;                 /* skip the moov header itself */
-    while (off + 8 <= size) {
-        uint64_t sz = be32(moov + off);
-        if (sz < 8 || off + sz > size) {
+    uint64_t end = stbl_off + stbl_size;
+    uint64_t stsd_off = 0;
+    uint64_t stsd_size = 0;
+    bool has_bframes = false;
+    bool have_stsd = false;
+
+    uint64_t it = stbl_off + 8;         /* past the stbl header */
+    while (it + 8 <= end) {
+        box_hdr_t ch;
+        if (!box_hdr_at(r, it, &ch) || it + ch.size > end) {
             break;
         }
-        if (box_type(moov + off) == be32((const uint8_t *)"trak")) {
-            const uint8_t *trak_body = moov + off + 8;
-            size_t trak_body_sz = (size_t)sz - 8;
-            int64_t mdia = find_box(trak_body, trak_body_sz,
-                                    be32((const uint8_t *)"mdia"));
-            if (mdia >= 0 && trak_body_sz >= (size_t)mdia + 8) {
-                const uint8_t *mdia_box = trak_body + mdia;
-                size_t mdia_sz = be32(mdia_box);
-                if (mdia_sz >= 16) {
-                    const uint8_t *mdia_body = mdia_box + 8;
-                    size_t mdia_body_sz = mdia_sz - 8;
-                    int64_t hdlr = find_box(mdia_body, mdia_body_sz,
-                                            be32((const uint8_t *)"hdlr"));
-                    bool video = false;
-                    if (hdlr >= 0 && mdia_body_sz >= (size_t)hdlr + 20) {
-                        /* hdlr box: hdr(8) + version/flags(4) + pre_defined(4)
-                         * -> handler_type sits at box_start + 16 */
-                        video = (be32(mdia_body + hdlr + 16) ==
-                                 be32((const uint8_t *)"vide"));
-                    }
-                    if (video) {
-                        int64_t minf = find_box(mdia_body, mdia_body_sz,
-                                                be32((const uint8_t *)"minf"));
-                        if (minf >= 0) {
-                            const uint8_t *minf_box = mdia_body + minf;
-                            size_t minf_sz = be32(minf_box);
-                            if (minf_sz >= 16) {
-                                const uint8_t *minf_body = minf_box + 8;
-                                size_t minf_body_sz = minf_sz - 8;
-                                int64_t stbl = find_box(minf_body, minf_body_sz,
-                                                        be32((const uint8_t *)"stbl"));
-                                if (stbl >= 0) {
-                                    const uint8_t *stbl_box = minf_body + stbl;
-                                    films_play_err_t r = stsd_inspect(
-                                        stbl_box, be32(stbl_box), out_w, out_h);
-                                    if (r == FILMS_PLAY_OK ||
-                                        r == FILMS_ERR_HIGH_PROFILE ||
-                                        r == FILMS_ERR_NOT_H264) {
-                                        return r;   /* real codec verdict */
-                                    }
-                                    /* this video trak had no usable stsd: keep
-                                     * it as a fallback but try other traks */
-                                }
-                            }
-                        }
-                    }
-                }
+        if (ch.type == fourcc("ctts") && ch.size >= ch.hdr + 8) {
+            /* version/flags(4) + entry_count(4); the offset table is NOT
+             * fetched - entry_count > 0 already implies reordered pts */
+            uint8_t ct[8];
+            if (lazy_read(r, it + ch.hdr, ct, sizeof(ct))) {
+                has_bframes = (be32(ct + 4) > 0);
             }
+        } else if (ch.type == fourcc("stsd")) {
+            stsd_off = it;
+            stsd_size = ch.size;
+            have_stsd = true;
         }
-        off += sz;
+        it += ch.size;
+    }
+    if (!have_stsd) {
+        return FILMS_ERR_NO_VIDEO;
+    }
+
+    /* stsd: hdr(8) + version/flags(4) + entry_count(4) + entries */
+    uint8_t h[8];
+    if (!lazy_read(r, stsd_off + 8, h, sizeof(h))) {
+        return FILMS_ERR_NO_VIDEO;
+    }
+    uint64_t entry = stsd_off + 16;     /* first sample entry */
+    if (!lazy_read(r, entry, h, sizeof(h))) {
+        return FILMS_ERR_NO_VIDEO;
+    }
+    uint64_t esz = be32(h);
+    uint32_t etype = be32(h + 4);
+    if (esz < 24 || entry + esz > stsd_off + stsd_size) {
+        return FILMS_ERR_NO_VIDEO;
+    }
+
+    if (etype == fourcc("hvc1") || etype == fourcc("hev1")) {
+        return FILMS_ERR_NOT_H264;      /* HEVC */
+    }
+    if (etype != fourcc("avc1") && etype != fourcc("avc2") &&
+        etype != fourcc("avc3") && etype != fourcc("avc4")) {
+        return FILMS_ERR_NOT_H264;      /* mpeg4-asp / unknown */
+    }
+
+    /* visual sample entry: width/height sit at payload + 24/26 */
+    uint8_t vh[28];
+    if (lazy_read(r, entry + 8, vh, sizeof(vh))) {
+        *out_w = be16_at(vh + 24);
+        *out_h = be16_at(vh + 26);
+    }
+
+    /* avcC sits among the child boxes after the 78-byte sample entry head */
+    uint64_t cend = entry + esz;
+    uint64_t cit  = entry + 8 + 78;
+    while (cit + 8 <= cend) {
+        box_hdr_t ch;
+        if (!box_hdr_at(r, cit, &ch) || ch.size < ch.hdr ||
+            cit + ch.size > cend) {
+            break;
+        }
+        if (ch.type == fourcc("avcC") && ch.size >= ch.hdr + 4) {
+            uint8_t a[4];               /* ver, profile, cflags, level */
+            if (!lazy_read(r, cit + ch.hdr, a, sizeof(a))) {
+                return FILMS_ERR_NO_VIDEO;
+            }
+            ESP_LOGI(TAG, "avcC: profile=%u constraint=0x%02x level=%u",
+                     a[1], a[2], a[3]);
+            return profile_verdict(a[1], a[2], has_bframes);
+        }
+        cit += ch.size;
+    }
+    /* avc1 without avcC (or avc3 with in-band SPS/PPS): profile unknown -
+     * fail safe */
+    return FILMS_ERR_HIGH_PROFILE;
+}
+
+/* Walk one trak: mdia -> hdlr (vide?) -> minf -> stbl. Boxes off the path
+ * are skipped by their header size alone - a multi-MB audio-trak index
+ * costs nothing to step over. */
+static films_play_err_t trak_inspect(lazy_reader_t *r, uint64_t trak_off,
+                                     uint64_t trak_size, uint16_t *out_w,
+                                     uint16_t *out_h)
+{
+    uint64_t end = trak_off + trak_size;
+
+    uint64_t mdia_off = 0;
+    uint64_t mdia_size = 0;
+    bool have_mdia = false;
+    uint64_t it = trak_off + 8;
+    while (it + 8 <= end) {
+        box_hdr_t ch;
+        if (!box_hdr_at(r, it, &ch) || it + ch.size > end) {
+            break;
+        }
+        if (ch.type == fourcc("mdia")) {
+            mdia_off = it;
+            mdia_size = ch.size;
+            have_mdia = true;
+        }
+        it += ch.size;
+    }
+    if (!have_mdia) {
+        return FILMS_ERR_NO_VIDEO;      /* caller tries other traks */
+    }
+
+    uint64_t mend = mdia_off + mdia_size;
+    uint64_t minf_off = 0;
+    uint64_t minf_size = 0;
+    bool video = false;
+    bool have_minf = false;
+    it = mdia_off + 8;
+    while (it + 8 <= mend) {
+        box_hdr_t ch;
+        if (!box_hdr_at(r, it, &ch) || it + ch.size > mend) {
+            break;
+        }
+        if (ch.type == fourcc("hdlr") && ch.size >= ch.hdr + 12) {
+            /* hdr(8) + version/flags(4) + pre_defined(4) -> handler_type
+             * sits at box_start + 16 */
+            uint8_t ht[4];
+            if (lazy_read(r, it + 16, ht, sizeof(ht))) {
+                video = (be32(ht) == fourcc("vide"));
+            }
+        } else if (ch.type == fourcc("minf")) {
+            minf_off = it;
+            minf_size = ch.size;
+            have_minf = true;
+        }
+        it += ch.size;
+    }
+    if (!video || !have_minf) {
+        return FILMS_ERR_NO_VIDEO;      /* audio / hint trak, or no minf */
+    }
+
+    uint64_t fend = minf_off + minf_size;
+    it = minf_off + 8;
+    while (it + 8 <= fend) {
+        box_hdr_t ch;
+        if (!box_hdr_at(r, it, &ch) || it + ch.size > fend) {
+            break;
+        }
+        if (ch.type == fourcc("stbl")) {
+            return stbl_inspect(r, it, ch.size, out_w, out_h);
+        }
+        it += ch.size;
     }
     return FILMS_ERR_NO_VIDEO;
 }
 
-static films_play_err_t mp4_walk(const char *url, uint16_t *out_w, uint16_t *out_h)
+/* Walk the moov: try every trak, return the first real codec verdict
+ * (OK / HIGH_PROFILE / NOT_H264). NO_VIDEO = no video trak carried a
+ * usable sample entry - same semantics as the old whole-buffer walk. */
+static films_play_err_t moov_inspect(lazy_reader_t *r, uint64_t moov_off,
+                                     uint16_t *out_w, uint16_t *out_h)
 {
-    uint8_t *chunk = heap_caps_malloc(FIRST_CHUNK, MALLOC_CAP_SPIRAM);
+    box_hdr_t m;
+    if (!box_hdr_at(r, moov_off, &m) || m.type != fourcc("moov")) {
+        return FILMS_ERR_NO_MP4;
+    }
+    uint64_t end = moov_off + m.size;
+    uint64_t it = moov_off + m.hdr;
+    while (it + 8 <= end) {
+        box_hdr_t ch;
+        if (!box_hdr_at(r, it, &ch) || it + ch.size > end) {
+            break;
+        }
+        if (ch.type == fourcc("trak")) {
+            films_play_err_t vr = trak_inspect(r, it, ch.size, out_w, out_h);
+            if (vr == FILMS_PLAY_OK || vr == FILMS_ERR_HIGH_PROFILE ||
+                vr == FILMS_ERR_NOT_H264) {
+                return vr;              /* real codec verdict */
+            }
+            /* this trak had no usable stsd: keep trying other traks */
+        }
+        it += ch.size;
+    }
+    return FILMS_ERR_NO_VIDEO;
+}
+
+/* Locate the moov box and walk it lazily. Three layouts handled:
+ *  - moov inside the first window (faststart): served from it, no extra
+ *    Range requests at all;
+ *  - moov spilling past the first window: the lazy walk slides the window
+ *    on demand;
+ *  - moov after mdat: hop box headers with tiny Range reads (unchanged)
+ *    until the moov header shows up, then walk it.
+ * Whatever the layout, only a few dozen KB ever leave the server - the old
+ * "download the whole moov" path (up to 12 MB, minutes per probe) is gone. */
+static films_play_err_t mp4_walk(const char *url, uint16_t *out_w,
+                                 uint16_t *out_h)
+{
+    uint8_t *chunk = heap_caps_malloc(PROBE_WINDOW, MALLOC_CAP_SPIRAM);
     if (chunk == NULL) {
         return FILMS_ERR_NET;
     }
 
     films_play_err_t verdict = FILMS_ERR_NET;
     bool strict = true;
-    int got = range_read(url, 0, chunk, FIRST_CHUNK, &strict);
+    int got = range_read(url, 0, chunk, PROBE_WINDOW, &strict);
     if (got < 16) {
         heap_caps_free(chunk);
         return FILMS_ERR_NET;
     }
 
-    /* top-level walk on the first chunk */
+    /* top-level walk on the first window */
     size_t off = 0;
     int64_t moov_off = -1;
     uint64_t moov_size = 0;
@@ -731,108 +892,77 @@ static films_play_err_t mp4_walk(const char *url, uint16_t *out_w, uint16_t *out
         if (sz < hdr) {
             break;
         }
-        if (box_type(chunk + off) == be32((const uint8_t *)"ftyp") && off != 0) {
+        if (box_type(chunk + off) == fourcc("ftyp") && off != 0) {
             break;      /* not an MP4 layout we understand */
         }
-        if (box_type(chunk + off) == be32((const uint8_t *)"moov")) {
+        if (box_type(chunk + off) == fourcc("moov")) {
             moov_off = (int64_t)off;
             moov_size = sz;
             break;
         }
-        if (box_type(chunk + off) == be32((const uint8_t *)"mdat")) {
-            break;      /* moov is after mdat: fetch it below */
+        if (box_type(chunk + off) == fourcc("mdat")) {
+            break;      /* moov is after mdat: find it below */
         }
         off += sz;
     }
 
     do {
-        if (moov_off >= 0 &&
-            (uint64_t)moov_off + moov_size <= (uint64_t)got) {
-            verdict = moov_inspect(chunk + moov_off, (size_t)moov_size,
-                                   out_w, out_h);
-            break;
-        }
-        if (moov_off >= 0) {
-            /* moov starts inside the first chunk but spills past it */
-            if (moov_size > MOOV_MAX) {
-                ESP_LOGW(TAG, "moov index %llu bytes > %u MB limit - rejected locally, not net",
-                         (unsigned long long)moov_size, (unsigned)(MOOV_MAX >> 20));
-                verdict = FILMS_ERR_BIG_MOOV;
-                break;
-            }
-            uint8_t *moov = heap_caps_malloc((size_t)moov_size, MALLOC_CAP_SPIRAM);
-            if (moov == NULL) {
-                verdict = FILMS_ERR_NET;
-                break;
-            }
-            memcpy(moov, chunk + moov_off, (size_t)got - (size_t)moov_off);
-            int tail = range_read(url, (uint64_t)got,
-                                  moov + got - moov_off,
-                                  (size_t)moov_size - ((size_t)got - (size_t)moov_off),
-                                  &strict);
-            if (tail >= 0) {
-                verdict = moov_inspect(moov, (size_t)moov_size, out_w, out_h);
-            } else {
-                verdict = strict ? FILMS_ERR_NET : FILMS_ERR_NO_RANGE;
-            }
-            heap_caps_free(moov);
-            break;
-        }
-        if (!strict) {
+        if (moov_off < 0 && !strict) {
+            /* the head read came back 200 - this server ignores Range, so
+             * any further offset read would return data from position 0 */
             verdict = FILMS_ERR_NO_RANGE;
             break;
         }
-        /* mdat came first: box-walk headers with tiny range reads */
-        uint8_t hdr[16];
-        uint64_t box_pos = (uint64_t)off;   /* offset of the mdat header */
-        int64_t m_moov = -1;
-        uint64_t m_size = 0;
-        for (int guard = 0; guard < 16; guard++) {
-            int h = range_read(url, box_pos, hdr, sizeof(hdr), &strict);
-            if (h < 8) {
-                break;
-            }
-            uint64_t sz = be32(hdr);
-            size_t hsz = 8;
-            if (sz == 1) {
-                if (h < 16) {
-                    break;      /* short read across a largesize header */
+        if (moov_off < 0) {
+            /* mdat came first: box-walk headers with tiny range reads */
+            uint8_t hdr[16];
+            uint64_t box_pos = (uint64_t)off;   /* offset of the mdat header */
+            for (int guard = 0; guard < 16; guard++) {
+                int h = range_read(url, box_pos, hdr, sizeof(hdr), &strict);
+                if (h < 8) {
+                    break;
                 }
-                sz = be64(hdr + 8);
-                hsz = 16;
+                uint64_t sz = be32(hdr);
+                size_t hsz = 8;
+                if (sz == 1) {
+                    if (h < 16) {
+                        break;      /* short read across a largesize header */
+                    }
+                    sz = be64(hdr + 8);
+                    hsz = 16;
+                }
+                if (sz < hsz) {
+                    break;
+                }
+                if (box_type(hdr) == fourcc("moov")) {
+                    moov_off = (int64_t)box_pos;
+                    moov_size = sz;
+                    break;
+                }
+                box_pos += sz;
             }
-            if (sz < hsz) {
+            if (moov_off < 0) {
+                verdict = FILMS_ERR_NO_MP4;
                 break;
             }
-            if (box_type(hdr) == be32((const uint8_t *)"moov")) {
-                m_moov = (int64_t)box_pos;
-                m_size = sz;
-                break;
-            }
-            box_pos += sz;
         }
-        if (m_moov < 0) {
-            verdict = FILMS_ERR_NO_MP4;
-            break;
-        }
-        if (m_size > MOOV_MAX) {
-            ESP_LOGW(TAG, "moov index %llu bytes > %u MB limit - rejected locally, not net",
-                     (unsigned long long)m_size, (unsigned)(MOOV_MAX >> 20));
+        if (moov_size > MOOV_SANITY_MAX) {
+            ESP_LOGW(TAG, "moov index %llu bytes > %u MB sanity limit",
+                     (unsigned long long)moov_size,
+                     (unsigned)(MOOV_SANITY_MAX >> 20));
             verdict = FILMS_ERR_BIG_MOOV;
             break;
         }
-        uint8_t *moov = heap_caps_malloc((size_t)m_size, MALLOC_CAP_SPIRAM);
-        if (moov == NULL) {
-            verdict = FILMS_ERR_NET;
-            break;
+        lazy_reader_t reader = {
+            .url      = url,
+            .win      = chunk,
+            .win_base = 0,
+            .win_len  = (size_t)got,
+        };
+        verdict = moov_inspect(&reader, (uint64_t)moov_off, out_w, out_h);
+        if (verdict == FILMS_ERR_NET && reader.saw_200) {
+            verdict = FILMS_ERR_NO_RANGE;
         }
-        int t = range_read(url, (uint64_t)m_moov, moov, (size_t)m_size, &strict);
-        if (t == (int)m_size) {
-            verdict = moov_inspect(moov, (size_t)m_size, out_w, out_h);
-        } else {
-            verdict = FILMS_ERR_NET;
-        }
-        heap_caps_free(moov);
     } while (0);
 
     heap_caps_free(chunk);
@@ -841,13 +971,47 @@ static films_play_err_t mp4_walk(const char *url, uint16_t *out_w, uint16_t *out
     return verdict;
 }
 
-films_play_err_t films_probe_url(const char *url, uint16_t *out_w, uint16_t *out_h)
+/* Verdict cache keyed by the play URL. Re-tapping a film must not repeat
+ * the probe: a rejected film then fails instantly (the busy card barely
+ * flashes) and an accepted one skips straight to the player prep - the
+ * user's log showed the same 4.5 MB moov walked twice for one film because
+ * the second tap re-probed. Only transport-independent verdicts are
+ * cached; NET / NO_RANGE stay out so a flaky node is retried on the next
+ * tap. */
+typedef struct {
+    char             url[FILMS_URL_MAX];
+    films_play_err_t verdict;
+    uint16_t         w, h;
+} probe_cache_t;
+static probe_cache_t s_probe_cache[8];
+static int           s_probe_cache_n;
+
+films_play_err_t films_probe_url(const char *url, uint16_t *out_w,
+                                 uint16_t *out_h)
 {
     *out_w = 0;
     *out_h = 0;
     if (url == NULL || strncasecmp(url, "http", 4) != 0) {
         return FILMS_PLAY_OK;   /* local file: nothing to check */
     }
+
+    for (int i = 0; i < s_probe_cache_n; i++) {
+        if (strcmp(s_probe_cache[i].url, url) == 0) {
+            if (i != 0) {
+                probe_cache_t t = s_probe_cache[i];
+                memmove(&s_probe_cache[1], &s_probe_cache[0],
+                        sizeof(probe_cache_t) * (size_t)i);
+                s_probe_cache[0] = t;
+            }
+            ESP_LOGI(TAG, "probe %s: cached %ux%u %s", url,
+                     s_probe_cache[0].w, s_probe_cache[0].h,
+                     films_err_str(s_probe_cache[0].verdict));
+            *out_w = s_probe_cache[0].w;
+            *out_h = s_probe_cache[0].h;
+            return s_probe_cache[0].verdict;
+        }
+    }
+
     films_play_err_t r = mp4_walk(url, out_w, out_h);
     if (r == FILMS_ERR_NET) {
         /* archive.org nodes occasionally drop the follow-up connection
@@ -857,6 +1021,21 @@ films_play_err_t films_probe_url(const char *url, uint16_t *out_w, uint16_t *out
         ESP_LOGW(TAG, "probe: transient net failure, retrying once");
         vTaskDelay(pdMS_TO_TICKS(800));
         r = mp4_walk(url, out_w, out_h);
+    }
+
+    if (r == FILMS_PLAY_OK || r == FILMS_ERR_BIG_MOOV ||
+        r == FILMS_ERR_NOT_H264 || r == FILMS_ERR_HIGH_PROFILE ||
+        r == FILMS_ERR_NO_MP4 || r == FILMS_ERR_NO_VIDEO) {
+        probe_cache_t e = { .verdict = r, .w = *out_w, .h = *out_h };
+        strlcpy(e.url, url, sizeof(e.url));
+        for (int i = s_probe_cache_n - 1; i > 0; i--) {
+            s_probe_cache[i] = s_probe_cache[i - 1];
+        }
+        if (s_probe_cache_n <
+            (int)(sizeof(s_probe_cache) / sizeof(s_probe_cache[0]))) {
+            s_probe_cache_n++;
+        }
+        s_probe_cache[0] = e;
     }
     return r;
 }
@@ -874,7 +1053,7 @@ const char *films_err_str(films_play_err_t e)
     case FILMS_ERR_NO_RANGE:  return "сервер без докачки";
     case FILMS_ERR_NOT_H264:  return "кодек не H.264";
     case FILMS_ERR_HIGH_PROFILE:
-        return "нужен H.264 Baseline";
+        return "нужен H.264 Baseline/Main(constr.)";
     case FILMS_ERR_NO_VIDEO:  return "нет видеодорожки";
     default:                  return "ошибка";
     }

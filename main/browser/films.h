@@ -7,11 +7,15 @@
  *   1. advancedsearch.php -> JSON list of {identifier, title}
  *   2. metadata/<id>      -> JSON file list -> best mp4 derivative
  *
- * Before handing the URL to the player, films_probe_url() range-reads the
- * MP4 headers and walks the boxes down to avcC to check the H.264 profile:
- * the SW decoder (tinyh264) only accepts Constrained/Baseline (profile 66).
- * Main/High streams are rejected here with a readable reason instead of a
- * decoder error mid-playback. The play URL is the DIRECT cluster-node link
+ * Before handing the URL to the player, films_probe_url() walks the MP4
+ * box structure with small targeted Range reads (a sliding 64 KB window;
+ * the moov index is never downloaded wholesale) down to avcC to check the
+ * H.264 profile. The SW decoder (h264bsd) decodes Baseline (66) and
+ * constraint_set1-Main (77) streams - the latter are limited to Baseline
+ * tools by definition and additionally guarded against B-frames via the
+ * ctts box. Other profiles (High etc.) are rejected here with a readable
+ * reason instead of a decoder error mid-playback. The play URL is the
+ * DIRECT cluster-node link
  * (https://<server><dir>/<file>) taken from the metadata - the node serves
  * Range requests itself and stays up when the archive.org/download
  * redirect frontend brownouts. Every probe failure is logged with its
@@ -44,12 +48,12 @@ typedef struct {
 typedef enum {
     FILMS_PLAY_OK = 0,
     FILMS_ERR_NET,          /* search/metadata/probe transport failure */
-    FILMS_ERR_BIG_MOOV,     /* moov index exceeds the probe fetch limit */
+    FILMS_ERR_BIG_MOOV,     /* moov index exceeds the sanity limit      */
     FILMS_ERR_NO_RESULT,
     FILMS_ERR_NO_MP4,       /* item has no .mp4 derivative             */
     FILMS_ERR_NO_RANGE,     /* server ignored the Range request        */
     FILMS_ERR_NOT_H264,     /* HEVC / MPEG-4 ASP / unknown codec       */
-    FILMS_ERR_HIGH_PROFILE, /* H.264 Main/High - decoder rejects it    */
+    FILMS_ERR_HIGH_PROFILE, /* High, or Main without constraint_set1    */
     FILMS_ERR_NO_VIDEO,     /* mp4 without a video track               */
 } films_play_err_t;
 
@@ -80,8 +84,11 @@ films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz);
 /**
  * @brief Check that a remote MP4 is decodable by the SW H264 decoder.
  *
- * Range-reads the top-level MP4 boxes (and the whole moov, wherever it
- * sits), finds the first video track's sample entry and its avcC record.
+ * Walks the top-level MP4 boxes and the video track's sample entry with
+ * small targeted Range reads (sliding 64 KB window, a few requests total -
+ * not the whole moov), checks the avcC profile and dimensions, and looks
+ * at ctts for B-frames in constrained-Main streams. Verdicts are cached
+ * per URL: re-tapping a film never re-probes.
  *
  * @param[out] out_w  decoded video width (0 if unknown)
  * @param[out] out_h  decoded video height (0 if unknown)

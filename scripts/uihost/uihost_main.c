@@ -267,6 +267,8 @@ esp_err_t web_get(const char *url, const char *extra_cookie, char **out_body,
                   size_t *out_len, int *out_status)
 { (void)url; (void)extra_cookie; *out_body = NULL; *out_len = 0;
   if (out_status) *out_status = 0; return ESP_FAIL; }
+bool web_url_decode(const char *src, char *dst, size_t dst_size)
+{ (void)src; if (dst_size) dst[0] = '\0'; return false; }
 int html_parse_serp_ddg(char *h, web_result_t *r, int m) { (void)h; (void)r; (void)m; return 0; }
 int html_parse_serp_google(char *h, web_result_t *r, int m) { (void)h; (void)r; (void)m; return 0; }
 esp_err_t html_to_text(char *html, char *out, size_t sz) { (void)html; (void)sz; if (sz) out[0] = 0; return ESP_OK; }
