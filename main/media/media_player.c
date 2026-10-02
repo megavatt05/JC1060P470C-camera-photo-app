@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "app_lcd.h"
 #include "media_lib_adapter.h"
@@ -70,6 +71,44 @@ static struct {
     esp_video_render_handle_t video_render;
 } s_mp;
 
+/* Rate-limited BUFFERING/BUFFERED telemetry. At 512x288-class streams the
+ * SW decoder throttles the demuxer (full video queue blocks it
+ * head-of-line), so the re-buffering gate flaps enter/leave about once
+ * per grace period (~4 Hz) while the audio margin stays healthy -
+ * hundreds of events per minute, each previously logged (E-24). pstats
+ * still feeds СТОПЫ/БУФЕРИЗАЦИЯ on the OSD from every event; the UART log
+ * gets one summary line per 10 s instead. */
+static uint32_t s_buf_n_enter, s_buf_n_leave;
+static int64_t s_buf_last_log_us = -10000000;
+
+static void player_buf_evt_log(bool enter)
+{
+    int64_t now = esp_timer_get_time();
+    if (enter) {
+        s_buf_n_enter++;
+    } else {
+        s_buf_n_leave++;
+    }
+    if (now - s_buf_last_log_us < 10000000) {
+        return;
+    }
+    s_buf_last_log_us = now;
+    if (enter) {
+        ESP_LOGI(TAG, "buffering #%lu (buffered #%lu; further gate events rate-limited to 1 line / 10 s)",
+                 (unsigned long)s_buf_n_enter, (unsigned long)s_buf_n_leave);
+    } else {
+        ESP_LOGI(TAG, "buffered #%lu (buffering #%lu; further gate events rate-limited to 1 line / 10 s)",
+                 (unsigned long)s_buf_n_leave, (unsigned long)s_buf_n_enter);
+    }
+}
+
+static void player_buf_evt_reset(void)
+{
+    s_buf_n_enter = 0;
+    s_buf_n_leave = 0;
+    s_buf_last_log_us = -10000000;
+}
+
 static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
 {
     (void)ctx;
@@ -84,10 +123,10 @@ static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
         ESP_LOGI(TAG, "paused");
         break;
     case ESP_PLAYER_EVENT_BUFFERING:
-        ESP_LOGI(TAG, "buffering...");
+        player_buf_evt_log(true);
         break;
     case ESP_PLAYER_EVENT_BUFFERED:
-        ESP_LOGI(TAG, "buffered");
+        player_buf_evt_log(false);
         break;
     case ESP_PLAYER_EVENT_AUDIO_INFO_PARSED:
         ESP_LOGI(TAG, "audio track parsed");
@@ -456,6 +495,7 @@ static esp_err_t player_start(const char *url, bool video)
         ESP_LOGW(TAG, "buffer cfg override failed, keeping built-in defaults");
     }
     pstats_stream_reset();
+    player_buf_evt_reset();
     pstats_osd_set(video);
 
     /* esp_player pins video_decoder to core 0 by default, so the CPU-bound
