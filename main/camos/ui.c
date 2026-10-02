@@ -187,12 +187,14 @@ void ui_button(uint16_t *fb, int fb_w, int fb_h,
     ui_fill_rect(fb, fb_w, fb_h, b->x, b->y, b->x + b->w, b->y + b->h, bg);
     ui_frame(fb, fb_w, fb_h, b->x, b->y, b->x + b->w, b->y + b->h, 2, UI_COLOR_BORDER);
 
+    int sc = (b->scale > 0) ? b->scale : UI_SCALE_BTN;
+
     char fitted[24];
-    ui_text_fit(fitted, sizeof(fitted), b->label, b->w - 4, UI_SCALE_BTN);
-    int text_w = ui_text_width(fitted, UI_SCALE_BTN);
+    ui_text_fit(fitted, sizeof(fitted), b->label, b->w - 4, sc);
+    int text_w = ui_text_width(fitted, sc);
     int tx = b->x + (b->w - text_w) / 2;
-    int ty = b->y + (b->h - UI_FONT_H * UI_SCALE_BTN) / 2;
-    ui_text(fb, fb_w, fb_h, tx, ty, fitted, UI_SCALE_BTN, txt, bg);
+    int ty = b->y + (b->h - UI_FONT_H * sc) / 2;
+    ui_text(fb, fb_w, fb_h, tx, ty, fitted, sc, txt, bg);
 }
 
 bool ui_button_hit(const ui_button_t *b, int x, int y)

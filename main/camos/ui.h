@@ -44,6 +44,7 @@ typedef struct {
     int         x, y, w, h;
     const char *label;
     int         id;
+    int         scale;      /* label font scale; 0 = UI_SCALE_BTN */
 } ui_button_t;
 
 void ui_fill_rect(uint16_t *fb, int fb_w, int fb_h,

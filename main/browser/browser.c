@@ -44,17 +44,23 @@ static const char *TAG = "browser";
 #define GO_W            96
 
 #define CONTENT_Y0      (BAR_H + URL_H + 4)
-#define CONTENT_Y1      392     /* keyboard starts below   */
+#define CONTENT_Y1      368     /* keyboard starts below   */
 #define CONTENT_Y1_FULL (LCD_H - 64) /* without keyboard   */
 
 #define ROW_H           36      /* results list row        */
 #define LINE_H          20      /* page text line          */
 #define PAGE_COLS       ((LCD_W - 24) / (UI_FONT_W * UI_SCALE_TEXT))
 
-/* Keyboard geometry: 5 rows, keys 64x36, gap 8, centered */
-#define KEY_W           64
-#define KEY_H           36
-#define KEY_GAP         8
+/* Keyboard geometry: 5 rows of 80x44 keys, gaps 2 px vertical /
+ * 4 px horizontal, centered.  Key labels draw at KB_KEY_SCALE so a glyph
+ * (32x32 px) fills most of the button face.  Worst row is 12 keys:
+ * 12 * 80 + 11 * 4 = 1004 <= LCD_W (1024).  Five rows of 44 + 4 gaps of 2
+ * = 228 px, so the block spans CONTENT_Y1 + 2 .. 598 on a 600 px panel. */
+#define KEY_W           80
+#define KEY_H           44
+#define KEY_GAP         4
+#define KEY_VGAP        2
+#define KB_KEY_SCALE    4
 
 /* Button ids */
 enum {
@@ -303,12 +309,43 @@ static int kb_key_label(uint32_t cp, char *buf)
     return 2;
 }
 
+/* Bottom function row: SPC / DEL / EN|RU / engine / GO.  Shared by
+ * draw_keyboard() and keyboard_hit() so drawing and hit-testing can never
+ * diverge.  NULL labels are resolved from the runtime state. */
+static const struct { int w; const char *label; int id; } kb_bottom[] = {
+    { 200, "SPC", BTN_SPC },
+    { 150, "DEL", BTN_DEL },
+    { 150, NULL,  BTN_KBD },        /* EN | RU                    */
+    { 170, NULL,  BTN_ENGINE },     /* GGL | DDG                  */
+    { 170, "GO",  BTN_GO },
+};
+#define KB_BOTTOM_N (sizeof(kb_bottom) / sizeof(kb_bottom[0]))
+
+static const char *kb_bottom_label(size_t i)
+{
+    if (kb_bottom[i].label != NULL) {
+        return kb_bottom[i].label;
+    }
+    return kb_bottom[i].id == BTN_KBD ? (br.kb_ru ? "RU" : "EN")
+                                      : (br.engine_google ? "GGL" : "DDG");
+}
+
+static int kb_bottom_x0(void)
+{
+    int total = 0;
+    for (size_t i = 0; i < KB_BOTTOM_N; i++) {
+        total += kb_bottom[i].w;
+    }
+    total += (int)(KB_BOTTOM_N - 1) * KEY_GAP;
+    return (LCD_W - total) / 2;
+}
+
 static void draw_keyboard(uint16_t *fb)
 {
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y1, LCD_W, LCD_H, 0x0000);
 
     const uint32_t (*rows)[KB_ROW_MAX] = kb_rows();
-    int y = CONTENT_Y1 + 4;
+    int y = CONTENT_Y1 + KEY_VGAP;
     for (int r = 0; r < KB_ROWS_NUM; r++) {
         int n = 0;
         while (n < KB_ROW_MAX && rows[r][n] != 0) {
@@ -321,32 +358,20 @@ static void draw_keyboard(uint16_t *fb)
             char lab[3];
             kb_key_label(rows[r][k], lab);
             ui_button_t key = { .x = x, .y = y, .w = KEY_W, .h = KEY_H,
-                                .label = lab, .id = (int)rows[r][k] };
+                                .label = lab, .id = (int)rows[r][k],
+                                .scale = KB_KEY_SCALE };
             ui_button(fb, LCD_W, LCD_H, &key, false);
         }
-        y += KEY_H + 4;
+        y += KEY_H + KEY_VGAP;
     }
 
-    /* bottom row: SPC / DEL / EN|RU / engine / GO */
-    struct { int w; const char *label; int id; } bottom[] = {
-        { 160, "SPC",   BTN_SPC },
-        { 96,  "DEL",   BTN_DEL },
-        { 96,  br.kb_ru ? "RU" : "EN", BTN_KBD },
-        { 128, br.engine_google ? "GGL" : "DDG", BTN_ENGINE },
-        { 128, "GO",    BTN_GO },
-    };
-    int total = 0;
-    for (size_t i = 0; i < 5; i++) {
-        total += bottom[i].w;
-    }
-    total += 4 * KEY_GAP;
-
-    int x = (LCD_W - total) / 2;
-    for (size_t i = 0; i < 5; i++) {
-        ui_button_t key = { .x = x, .y = y, .w = bottom[i].w, .h = KEY_H,
-                            .label = bottom[i].label, .id = bottom[i].id };
+    int x = kb_bottom_x0();
+    for (size_t i = 0; i < KB_BOTTOM_N; i++) {
+        ui_button_t key = { .x = x, .y = y, .w = kb_bottom[i].w, .h = KEY_H,
+                            .label = kb_bottom_label(i), .id = kb_bottom[i].id,
+                            .scale = KB_KEY_SCALE };
         ui_button(fb, LCD_W, LCD_H, &key, false);
-        x += bottom[i].w + KEY_GAP;
+        x += kb_bottom[i].w + KEY_GAP;
     }
 }
 
@@ -358,7 +383,7 @@ static int keyboard_hit(int x, int y)
     }
 
     const uint32_t (*rows)[KB_ROW_MAX] = kb_rows();
-    int ky = CONTENT_Y1 + 4;
+    int ky = CONTENT_Y1 + KEY_VGAP;
     for (int r = 0; r < KB_ROWS_NUM; r++) {
         int n = 0;
         while (n < KB_ROW_MAX && rows[r][n] != 0) {
@@ -375,29 +400,16 @@ static int keyboard_hit(int x, int y)
             }
             return BTN_NONE;
         }
-        ky += KEY_H + 4;
+        ky += KEY_H + KEY_VGAP;
     }
-
-    struct { int w; const char *label; int id; } bottom[] = {
-        { 160, "SPC",   BTN_SPC },
-        { 96,  "DEL",   BTN_DEL },
-        { 96,  br.kb_ru ? "RU" : "EN", BTN_KBD },
-        { 128, br.engine_google ? "GGL" : "DDG", BTN_ENGINE },
-        { 128, "GO",    BTN_GO },
-    };
-    int total = 0;
-    for (size_t i = 0; i < 5; i++) {
-        total += bottom[i].w;
-    }
-    total += 4 * KEY_GAP;
-    int x0 = (LCD_W - total) / 2;
 
     if (y >= ky && y < ky + KEY_H) {
-        for (size_t i = 0; i < 5; i++) {
-            if (x >= x0 && x < x0 + bottom[i].w) {
-                return bottom[i].id;
+        int x0 = kb_bottom_x0();
+        for (size_t i = 0; i < KB_BOTTOM_N; i++) {
+            if (x >= x0 && x < x0 + kb_bottom[i].w) {
+                return kb_bottom[i].id;
             }
-            x0 += bottom[i].w + KEY_GAP;
+            x0 += kb_bottom[i].w + KEY_GAP;
         }
     }
     return BTN_NONE;
