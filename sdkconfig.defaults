@@ -65,3 +65,11 @@ CONFIG_VFS_SELECT_INRAM=y
 # Полное «отравление» кучи: canary вокруг каждого блока, abort с адресом
 # при попытке malloc/free затёртого блока — ранний индикатор порчи памяти:
 CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+
+# --- TLS: программный ECDSA ---
+# Аппаратный ECDSA-периферий на ESP32-P4 rev v1.3 недоступен (нужна v3+):
+# каждый HTTPS-хендшейк сыпал тремя ошибками "ECDSA peripheral not
+# supported on this chip revision" и всё равно падал в софтовую реализацию.
+# Отключаем аппаратные операции — TLS сразу идёт через софтовый mbedTLS:
+# CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY is not set
+# CONFIG_MBEDTLS_HARDWARE_ECDSA_SIGN is not set
