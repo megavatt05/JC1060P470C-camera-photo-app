@@ -33,6 +33,8 @@
 #include "browser/browser.h"
 #if CONFIG_EB_MEDIA_ENABLE
 #include "media/media_player.h"
+#include "media/sdcard.h"
+#include <dirent.h>
 #endif
 
 static const char *TAG = "browser";
@@ -88,6 +90,11 @@ enum {
     BTN_VOLDN,
     BTN_MBACK,
     BTN_MURL,
+    BTN_SD,                 /* open the SD file list        */
+    BTN_FREFR,              /* rescan the card              */
+    BTN_FUP,
+    BTN_FDOWN,
+    BTN_FILEROW,            /* row = (y - SD_ROWS_Y0)/SD_ROW_STRIDE */
     BTN_STATION,            /* + 0..RADIO_STATIONS_N-1 */
     BTN_VIDPRESET,          /* + 0..VIDEO_PRESETS_N-1 */
     BTN_CHAR = 0x20,        /* ids >= BTN_CHAR are literal chars */
@@ -105,6 +112,7 @@ typedef enum {
     ST_VIDEO,               /* video screen (presets + custom URL)     */
     ST_URLIN,               /* keyboard: type a media URL              */
     ST_VIDEOP,              /* video playing: the render owns the panel */
+    ST_FILES,               /* media files on the SD card              */
 #endif
 } browser_state_t;
 
@@ -564,7 +572,9 @@ static void draw_radio(uint16_t *fb)
         x += ctrls[i].w + 12;
     }
 
-    ui_button_t back = { 372, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
+    ui_button_t sd = { 200, 420, 280, 60, "SD-КАРТА", BTN_SD, 3 };
+    ui_button(fb, LCD_W, LCD_H, &sd, false);
+    ui_button_t back = { 544, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
     ui_button(fb, LCD_W, LCD_H, &back, false);
 
     if (media_get_state() != MEDIA_STATE_IDLE && media_get_url()[0] != '\0') {
@@ -594,7 +604,11 @@ static int radio_hit(int x, int y)
         }
         cx += ctrls[i].w + 12;
     }
-    ui_button_t back = { 372, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
+    ui_button_t sd = { 200, 420, 280, 60, "SD-КАРТА", BTN_SD, 3 };
+    if (ui_button_hit(&sd, x, y)) {
+        return BTN_SD;
+    }
+    ui_button_t back = { 544, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
     if (ui_button_hit(&back, x, y)) {
         return BTN_MBACK;
     }
@@ -625,13 +639,15 @@ static void draw_video(uint16_t *fb)
         ui_button(fb, LCD_W, LCD_H, &b, false);
     }
 
-    ui_button_t url = { 264, 356, 496, 64, "СВОЙ URL", BTN_MURL, 3 };
+    ui_button_t url = { 168, 356, 320, 64, "СВОЙ URL", BTN_MURL, 3 };
     ui_button(fb, LCD_W, LCD_H, &url, false);
+    ui_button_t sd = { 536, 356, 320, 64, "SD-КАРТА", BTN_SD, 3 };
+    ui_button(fb, LCD_W, LCD_H, &sd, false);
 
     ui_button_t back = { 372, 436, 280, 56, "НАЗАД", BTN_MBACK, 3 };
     ui_button(fb, LCD_W, LCD_H, &back, false);
 
-    const char *hint = "MP4 (H.264 + AAC) по HTTP/HTTPS";
+    const char *hint = "MP4 (H.264 + AAC) по HTTP/HTTPS или с SD-карты";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, 1)) / 2,
             508, hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
 }
@@ -645,15 +661,207 @@ static int video_hit(int x, int y)
             return b.id;
         }
     }
-    ui_button_t url = { 264, 356, 496, 64, "СВОЙ URL", BTN_MURL, 3 };
+    ui_button_t url = { 168, 356, 320, 64, "СВОЙ URL", BTN_MURL, 3 };
     if (ui_button_hit(&url, x, y)) {
         return BTN_MURL;
+    }
+    ui_button_t sd = { 536, 356, 320, 64, "SD-КАРТА", BTN_SD, 3 };
+    if (ui_button_hit(&sd, x, y)) {
+        return BTN_SD;
     }
     ui_button_t back = { 372, 436, 280, 56, "НАЗАД", BTN_MBACK, 3 };
     if (ui_button_hit(&back, x, y)) {
         return BTN_MBACK;
     }
     return BTN_NONE;
+}
+
+/* --- SD card file list ------------------------------------------------------- */
+
+#define SD_ROWS_Y0      92      /* first file row                  */
+#define SD_ROW_H        48
+#define SD_ROW_STRIDE   52
+#define SD_ROWS         7       /* visible rows                    */
+#define SD_FILES_MAX    32      /* scanned entries (scroll for more) */
+#define SD_NAME_MAX     96
+
+static struct {
+    char name[SD_NAME_MAX];
+    bool video;                 /* video file (else audio)         */
+} sd_files[SD_FILES_MAX];
+static int  sd_files_n;
+static int  sd_scroll;
+static bool sd_mount_err;
+static bool sd_from_video;      /* which screen opened the list    */
+
+/* where ST_VIDEOP returns after the playback stops */
+static browser_state_t videop_back = ST_VIDEO;
+
+/* forward decl: sd_play (below) starts videos through it */
+static void video_start_ui(const char *url);
+
+static bool sd_ext_match(const char *name, const char *const *exts, size_t n)
+{
+    size_t len = strlen(name);
+    for (size_t i = 0; i < n; i++) {
+        size_t el = strlen(exts[i]);
+        if (len > el && strcasecmp(name + len - el, exts[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Mount the card (lazy) and list media files in its root. The player
+ * decodes what this build enables: MP3/AAC/WAV/M4A audio, MP4 video. */
+static void sd_scan(void)
+{
+    sd_files_n = 0;
+    sd_scroll = 0;
+    sd_mount_err = false;
+
+    if (sdcard_mount() != ESP_OK) {
+        sd_mount_err = true;
+        return;
+    }
+    DIR *d = opendir(sdcard_mp());
+    if (d == NULL) {
+        sd_mount_err = true;
+        return;
+    }
+    static const char *const audio_ext[] = { ".mp3", ".wav", ".m4a", ".aac" };
+    static const char *const video_ext[] = { ".mp4", ".m4v", ".mov" };
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && sd_files_n < SD_FILES_MAX) {
+        const char *nm = e->d_name;
+        if (nm[0] == '.' || strlen(nm) >= SD_NAME_MAX) {
+            continue;
+        }
+        bool video = sd_ext_match(nm, video_ext, sizeof(video_ext) / sizeof(video_ext[0]));
+        if (!video && !sd_ext_match(nm, audio_ext, sizeof(audio_ext) / sizeof(audio_ext[0]))) {
+            continue;
+        }
+        strlcpy(sd_files[sd_files_n].name, nm, SD_NAME_MAX);
+        sd_files[sd_files_n].video = video;
+        sd_files_n++;
+    }
+    closedir(d);
+
+    /* FAT lists in creation order - sort alphabetically for usability */
+    for (int i = 1; i < sd_files_n; i++) {
+        typeof(sd_files[0]) t = sd_files[i];
+        int j = i - 1;
+        while (j >= 0 && strcmp(sd_files[j].name, t.name) > 0) {
+            sd_files[j + 1] = sd_files[j];
+            j--;
+        }
+        sd_files[j + 1] = t;
+    }
+    ESP_LOGI(TAG, "SD: %d media file(s) in %s", sd_files_n, sdcard_mp());
+}
+
+/* Shared by draw and hit-test; label buffer is static on purpose: the
+ * browser task is the only caller and label must outlive the call. */
+static void sd_file_btn(int vis_row, ui_button_t *b)
+{
+    static char lab[SD_NAME_MAX + 8];
+    const typeof(sd_files[0]) *f = &sd_files[sd_scroll + vis_row];
+    snprintf(lab, sizeof(lab), "%s %s", f->video ? "[V]" : "[A]", f->name);
+    b->x = 12;
+    b->y = SD_ROWS_Y0 + vis_row * SD_ROW_STRIDE;
+    b->w = LCD_W - 24;
+    b->h = SD_ROW_H;
+    b->label = lab;
+    b->id = BTN_FILEROW;
+    b->scale = 2;
+}
+
+static void draw_files(uint16_t *fb)
+{
+    draw_status_bar(fb);
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H, LCD_W, LCD_H, UI_COLOR_BG);
+
+    ui_text(fb, LCD_W, LCD_H, 12, 44, "ФАЙЛЫ SD", UI_SCALE_TITLE,
+            UI_COLOR_ACCENT, UI_COLOR_BG);
+    char st[48];
+    snprintf(st, sizeof(st), "%s  ЗВУК:%d", media_state_str(), media_get_volume());
+    ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(st, UI_SCALE_TEXT) - 12,
+            52, st, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
+
+    if (sd_mount_err) {
+        const char *msg = "карта не читается (FAT32?) - ОБНОВИТЬ повторит";
+        ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(msg, UI_SCALE_TEXT)) / 2,
+                260, msg, UI_SCALE_TEXT, UI_COLOR_ERR, UI_COLOR_BG);
+    } else if (sd_files_n == 0) {
+        const char *msg = "нет медиафайлов в корне карты";
+        ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(msg, UI_SCALE_TEXT)) / 2,
+                260, msg, UI_SCALE_TEXT, UI_COLOR_BORDER, UI_COLOR_BG);
+    } else {
+        int rows = sd_files_n - sd_scroll;
+        if (rows > SD_ROWS) {
+            rows = SD_ROWS;
+        }
+        for (int i = 0; i < rows; i++) {
+            ui_button_t b;
+            sd_file_btn(i, &b);
+            ui_button(fb, LCD_W, LCD_H, &b, false);
+        }
+        int left = sd_files_n - sd_scroll - rows;
+        if (left > 0) {
+            char more[48];
+            snprintf(more, sizeof(more), "листать: ВНИЗ (ещё %d)", left);
+            ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(more, 1)) / 2,
+                    536, more, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+        }
+    }
+
+    static const struct { int w; const char *lab; int id; } ctrls[] = {
+        { 140, "ВВЕРХ",    BTN_FUP    }, { 200, "ОБНОВИТЬ", BTN_FREFR },
+        { 140, "ВНИЗ",     BTN_FDOWN  }, { 200, "НАЗАД",    BTN_MBACK },
+    };
+    int x = (LCD_W - (140 + 200 + 140 + 200 + 3 * 12)) / 2;
+    for (size_t i = 0; i < sizeof(ctrls) / sizeof(ctrls[0]); i++) {
+        ui_button_t b = { x, 466, ctrls[i].w, 60, ctrls[i].lab, ctrls[i].id, 2 };
+        ui_button(fb, LCD_W, LCD_H, &b, false);
+        x += ctrls[i].w + 12;
+    }
+}
+
+static int files_hit(int x, int y)
+{
+    if (y >= SD_ROWS_Y0 && y < SD_ROWS_Y0 + SD_ROWS * SD_ROW_STRIDE - 4 &&
+        x >= 12 && x < LCD_W - 12) {
+        return BTN_FILEROW;
+    }
+    static const struct { int w; int id; } ctrls[] = {
+        { 140, BTN_FUP }, { 200, BTN_FREFR }, { 140, BTN_FDOWN }, { 200, BTN_MBACK },
+    };
+    int cx = (LCD_W - (140 + 200 + 140 + 200 + 3 * 12)) / 2;
+    for (size_t i = 0; i < sizeof(ctrls) / sizeof(ctrls[0]); i++) {
+        if (x >= cx && x < cx + ctrls[i].w && y >= 466 && y < 526) {
+            return ctrls[i].id;
+        }
+        cx += ctrls[i].w + 12;
+    }
+    return BTN_NONE;
+}
+
+/* Play one file from the list (index is absolute, not scrolled) */
+static void sd_play(int idx)
+{
+    if (idx < 0 || idx >= sd_files_n) {
+        return;
+    }
+    char path[SD_NAME_MAX + 24];
+    snprintf(path, sizeof(path), "%s/%s", sdcard_mp(), sd_files[idx].name);
+    ESP_LOGI(TAG, "play from SD: %s", path);
+    if (sd_files[idx].video) {
+        videop_back = ST_FILES;
+        video_start_ui(path);
+    } else {
+        media_radio_start(path);   /* audio keeps playing in background */
+        draw_screen();
+    }
 }
 
 static void draw_urlin(uint16_t *fb)
@@ -673,7 +881,7 @@ static void draw_urlin(uint16_t *fb)
 }
 
 /* Start a video (preset or custom URL): loading frame first, then hand
- * the panel over to the render on success. */
+ * the panel over to the render on success. The caller sets videop_back. */
 static void video_start_ui(const char *url)
 {
     void *fb = NULL;
@@ -699,6 +907,7 @@ static void urlin_apply(void)
         return;
     }
     if (br.urlin_video) {
+        videop_back = ST_VIDEO;
         video_start_ui(url);
     } else {
         media_radio_start(url);
@@ -876,6 +1085,7 @@ static void draw_screen(void)
     case ST_RADIO:    draw_radio(fb);        break;
     case ST_VIDEO:    draw_video(fb);        break;
     case ST_URLIN:    draw_urlin(fb);        break;
+    case ST_FILES:    draw_files(fb);        break;
     case ST_VIDEOP:   /* render owns the panel - nothing to draw */ break;
 #endif
     }
@@ -1150,6 +1360,12 @@ static void browser_task(void *arg)
                         br.state = ST_URLIN;
                         draw_screen();
                         break;
+                    case BTN_SD:
+                        sd_from_video = false;
+                        sd_scan();
+                        br.state = ST_FILES;
+                        draw_screen();
+                        break;
                     case BTN_MBACK:
                         br.state = ST_HOME;
                         draw_screen();
@@ -1165,6 +1381,7 @@ static void browser_task(void *arg)
             if (tap) {
                 int id = video_hit(tap_x, tap_y);
                 if (id >= BTN_VIDPRESET && id < (int)(BTN_VIDPRESET + VIDEO_PRESETS_N)) {
+                    videop_back = ST_VIDEO;
                     video_start_ui(video_presets[id - BTN_VIDPRESET].url);
                 } else {
                     switch (id) {
@@ -1174,8 +1391,50 @@ static void browser_task(void *arg)
                         br.state = ST_URLIN;
                         draw_screen();
                         break;
+                    case BTN_SD:
+                        sd_from_video = true;
+                        sd_scan();
+                        br.state = ST_FILES;
+                        draw_screen();
+                        break;
                     case BTN_MBACK:
                         br.state = ST_HOME;
+                        draw_screen();
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+
+        case ST_FILES:
+            if (tap) {
+                int id = files_hit(tap_x, tap_y);
+                if (id == BTN_FILEROW) {
+                    int row = (tap_y - SD_ROWS_Y0) / SD_ROW_STRIDE;
+                    sd_play(sd_scroll + row);
+                } else {
+                    switch (id) {
+                    case BTN_FREFR:
+                        sdcard_reprobe();
+                        sd_scan();
+                        draw_screen();
+                        break;
+                    case BTN_FUP:
+                        if (sd_scroll > 0) {
+                            sd_scroll--;
+                            draw_screen();
+                        }
+                        break;
+                    case BTN_FDOWN:
+                        if (sd_scroll + SD_ROWS < sd_files_n) {
+                            sd_scroll++;
+                            draw_screen();
+                        }
+                        break;
+                    case BTN_MBACK:
+                        br.state = sd_from_video ? ST_VIDEO : ST_RADIO;
                         draw_screen();
                         break;
                     default:
@@ -1237,11 +1496,11 @@ static void browser_task(void *arg)
                 media_get_state() == MEDIA_STATE_ERROR ||
                 media_video_active() == false) {
                 media_stop();
-                br.state = ST_VIDEO;
+                br.state = videop_back;
                 draw_screen();
             } else if (tap) {
                 media_stop();
-                br.state = ST_VIDEO;
+                br.state = videop_back;
                 draw_screen();
             }
             break;

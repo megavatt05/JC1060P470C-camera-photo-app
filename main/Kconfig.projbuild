@@ -181,6 +181,54 @@ menu "CamBrowser (Ethernet Browser on LCD)"
             help
               ES8311 at ADDR pin low answers at 7-bit 0x18, which is 0x30
               in the 8-bit write convention used by esp_codec_dev.
+
+        # SD card wiring of the same board (Guition JC-ESP32P4-M3 module):
+        # SDMMC slot 0 dedicated pins, card IO rail from the on-chip LDO
+        # channel 4. Confirmed against independent board configs.
+        config EB_SD_ENABLE
+            bool "Enable SD card (media files from microSD)"
+            default y
+            help
+              Mounts the microSD card on demand (media file screen) and
+              lets radio/video play files from it. Card must be FAT32
+              (exFAT is not supported by FatFS).
+
+        config EB_SD_MOUNT
+            string "SD mount point"
+            default "/sdcard"
+
+        config EB_SD_MAX_FREQ_KHZ
+            int "SD bus max frequency (kHz)"
+            default 20000
+            range 400 40000
+
+        config EB_SD_LDO_CHAN
+            int "On-chip LDO channel powering the card IO"
+            default 4
+
+        config EB_SD_CLK_GPIO
+            int "SD CLK GPIO"
+            default 43
+
+        config EB_SD_CMD_GPIO
+            int "SD CMD GPIO"
+            default 44
+
+        config EB_SD_D0_GPIO
+            int "SD D0 GPIO"
+            default 39
+
+        config EB_SD_D1_GPIO
+            int "SD D1 GPIO"
+            default 40
+
+        config EB_SD_D2_GPIO
+            int "SD D2 GPIO"
+            default 41
+
+        config EB_SD_D3_GPIO
+            int "SD D3 GPIO"
+            default 42
     endmenu
 
 endmenu

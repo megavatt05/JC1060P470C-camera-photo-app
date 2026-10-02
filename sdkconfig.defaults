@@ -51,6 +51,13 @@ CONFIG_VIDEO_DECODER_SW_H264_SUPPORT=y
 # Кодек платы: ES8311
 CONFIG_CODEC_ES8311_SUPPORT=y
 
+# --- SD-карта (медиа-файлы с microSD) ---
+# Длинные имена файлов и UTF-8 имена (иначе русские имена нечитаемы);
+# файловый IO esp_player ходит через VFS -> /sdcard
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LWIP_HOOK_IP6_INPUT_NONE=y
 

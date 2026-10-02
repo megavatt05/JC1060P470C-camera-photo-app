@@ -2,7 +2,7 @@ set(srcs "main.c" "app_lcd.c" "app_overlay.c"
           "camos/ui.c" "camos/touch.c"
           "net/app_eth.c"
           "browser/web_client.c" "browser/html_text.c" "browser/browser.c"
-          "media/media_audio.c" "media/media_player.c")
+          "media/media_audio.c" "media/media_player.c" "media/sdcard.c")
 
 idf_component_register(SRCS "${srcs}"
                        PRIV_INCLUDE_DIRS .
@@ -21,6 +21,9 @@ idf_component_register(SRCS "${srcs}"
                            esp-tls
                            heap
                            log
+                           fatfs
+                           sdmmc
+                           esp_driver_sdmmc
                            espressif__esp_codec_dev
                            espressif__esp_player
                            espressif__media_lib_sal
