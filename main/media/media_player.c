@@ -533,19 +533,33 @@ esp_err_t media_player_init(void)
     /* Playback stats: NIC rx counter + 1 Hz sampler (pstats.c) */
     pstats_init();
 
+    /* esp_player's format helper guesses the container from the URL file
+     * extension; radio streams have none (.../ep128, icecast mounts), so
+     * it logs a scary "Invalid argument. url: ... format: 0x..." and the
+     * pipeline just falls back to probing (player_stream.c ignores the
+     * error - playback is unaffected). Silence the tag: its remaining
+     * messages duplicate failures we already surface ourselves. */
+    esp_log_level_set("ESP_PLAYER_HELPER", ESP_LOG_NONE);
+
     /* The SW H264 decoder legitimately saturates its core (core 1) for
      * minutes at 360p-class streams; IDLE1 then never runs and the task
      * watchdog dumps registers every ~5 s while playback keeps going.
-     * Unsubscribe CPU1's idle task: decode starvation is now VISIBLE in
-     * the on-screen stats (CPU1 %, FPS vs target) instead of log spam.
-     * Failure is fine (already unsubscribed / not watched). */
-#if INCLUDE_xTaskGetIdleTaskHandle
+     * Watch only CPU0's idle task via esp_task_wdt_reconfigure(): decode
+     * starvation on core 1 becomes VISIBLE in the on-screen stats (CPU1
+     * %, FPS vs target) instead of watchdog dumps. reconfigure() - unlike
+     * a bare esp_task_wdt_delete(idle1) - also deregisters the core-1
+     * idle hook; with delete alone the hook kept feeding a now-unknown
+     * task, and every core-1 idle pass logged "task not found" (E-23).
+     * Timeout and panic behaviour mirror the Kconfig unchanged. */
+#if CONFIG_ESP_TASK_WDT_INIT
     {
-        TaskHandle_t idle1 = xTaskGetIdleTaskHandleForCore(1);
-        if (idle1 != NULL) {
-            esp_err_t werr = esp_task_wdt_delete(idle1);
-            ESP_LOGI(TAG, "IDLE1 watchdog unsubscribe: %s", esp_err_to_name(werr));
-        }
+        esp_task_wdt_config_t wcfg = {
+            .timeout_ms     = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000,
+            .idle_core_mask = (1 << 0), /* keep CPU0 watched, drop CPU1 */
+            .trigger_panic  = CONFIG_ESP_TASK_WDT_PANIC,
+        };
+        esp_err_t werr = esp_task_wdt_reconfigure(&wcfg);
+        ESP_LOGI(TAG, "TWDT idle watch: CPU0 only: %s", esp_err_to_name(werr));
     }
 #endif
 
