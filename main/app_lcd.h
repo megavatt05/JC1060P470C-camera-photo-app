@@ -86,4 +86,17 @@ esp_lcd_panel_handle_t app_lcd_get_panel(void);
  */
 esp_lcd_panel_io_handle_t app_lcd_get_io(void);
 
+/**
+ * @brief Reset the DPI panel event callbacks to "none".
+ *
+ * esp_video_render's LCD backend registers .on_color_trans_done on our panel
+ * (with the backend object as user_ctx) and never unregisters it on destroy
+ * (verified in esp_video_render 1.0.0 and 1.1.0). Once the backend is freed,
+ * the next app_lcd_flush() invokes the stale callback with a freed context
+ * (xSemaphoreGive on poisoned heap -> LoadProhibited crash right after a
+ * video stops). Call this after the video render is destroyed; a later
+ * video start re-registers its own callbacks.
+ */
+void app_lcd_dpi_clear_callbacks(void);
+
 #endif

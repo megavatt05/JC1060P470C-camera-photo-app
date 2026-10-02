@@ -610,3 +610,17 @@ esp_lcd_panel_io_handle_t app_lcd_get_io(void)
 {
     return mipi_dbi_io;
 }
+
+void app_lcd_dpi_clear_callbacks(void)
+{
+    if (display_handle == NULL) {
+        return;
+    }
+    /* Overwrite whatever the video render backend left on the panel with an
+     * all-NULL set: esp_lcd_dpi_panel_register_event_callbacks() copies the
+     * struct, and esp_lcd skips every callback that is NULL. Resetting
+     * user_ctx together with the callbacks makes the panel safe for browser
+     * draws after the backend object has been freed. */
+    esp_lcd_dpi_panel_event_callbacks_t cbs = { 0 };
+    esp_lcd_dpi_panel_register_event_callbacks(display_handle, &cbs, NULL);
+}

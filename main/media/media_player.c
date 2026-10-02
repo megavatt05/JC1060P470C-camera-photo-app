@@ -203,6 +203,16 @@ static void destroy_video_render(void)
         esp_gmf_pool_deinit(s_mp.video_pool);
         s_mp.video_pool = NULL;
     }
+    /* The LCD backend registers .on_color_trans_done on our DPI panel with
+     * itself as the context and never unregisters it on close (verified in
+     * esp_video_render 1.0.0 and 1.1.0). After esp_video_render_destroy()
+     * freed the backend, the next app_lcd_flush() still invoked the stale
+     * callback (esp_lcd calls on_color_trans_done synchronously from
+     * dpi_panel_draw_bitmap_2d) -> xSemaphoreGive on freed memory ->
+     * "Guru Meditation Error: Core 1 panic'ed (Load access fault)" right
+     * after a video finished. Clear the registration so the panel is safe
+     * for browser UI draws again. */
+    app_lcd_dpi_clear_callbacks();
 }
 
 static esp_err_t create_video_render(void)
