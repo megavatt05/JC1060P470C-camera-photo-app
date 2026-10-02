@@ -1,15 +1,11 @@
-name: ESP32-P4 Ethernet Browser Build CI
-
+name: ESP32-P4 Firmware Build CI (v6.0.3)
 on:
   push:
-    branches: 
-      - "main"
-      - "feature/ethernet-browser"
+    branches: [ "main", "master", "feature/ethernet-browser" ]
   pull_request:
-    branches: 
-      - "main"
-      - "feature/ethernet-browser"
+    branches: [ "main", "master", "feature/ethernet-browser" ]
   workflow_dispatch: 
+
 
 jobs:
   build_firmware:
