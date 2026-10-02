@@ -19,10 +19,25 @@
  *    level on every bus where probing failed, so the real address and
  *    bus can be read straight from the boot log.
  *
+ * v3 changes ("probe finds GT911 but touches do nothing"):
+ *  - FIXED: point data base register. GT911 point 1 starts at 0x814F
+ *    (track id, X lo, X hi, Y lo, Y hi, size lo, size hi, rsvd) - the
+ *    same layout the official esp_lcd_touch_gt911 component reads.
+ *    v2 read from 0x8150 (= X lo, one byte off) and byte-shifted every
+ *    coordinate into garbage, so taps landed in a random corner and
+ *    the browser ignored them.
+ *  - Config diagnostics at init: config version / X output max / Y
+ *    output max are read from 0x8047.. and logged at INFO - a blank
+ *    (0x00/0xFF) or mismatched config shows up immediately in the log.
+ *  - Auto X/Y swap: if the chip reports a portrait range (Xout < Yout)
+ *    on a landscape panel (or vice versa), coordinates are swapped in
+ *    software; EB_TOUCH_SWAP_XY still acts as a manual override.
+ *  - First 5 touch events logged at INFO with raw and screen coords.
+ *
  * Registers used (public datasheet knowledge):
  *   GT911   0x5D/0x14, 16-bit regs: product id 0x8140..0x8143,
  *           status 0x814E (bit7 ready, bit3 coords valid),
- *           points at 0x8150, 8 bytes per point
+ *           points from 0x814F, 8 bytes per point
  *   FT5x06  0x38, 8-bit regs: touch count 0x02, points from 0x03 (6 bytes),
  *           vendor id 0xA8
  *   CST816  0x15, 8-bit regs: touch count 0x02, points from 0x03 (6 bytes),
@@ -55,6 +70,8 @@ static struct {
     touch_chip_t chip;
     uint8_t addr;
     int max_points;
+    bool swap_xy;               /* runtime: auto-detected or Kconfig */
+    int dbg_touches;            /* first N touches logged at INFO */
 } s_tp;
 
 /* --- Hardware reset (GT911 needs it to answer at all) --------------------- */
@@ -211,6 +228,58 @@ static esp_err_t tp_probe_one(uint8_t addr, touch_chip_t chip)
     return ESP_OK;
 }
 
+/* Runtime X/Y swap flag: Kconfig manual override + auto-orientation below */
+static bool tp_swap_kconfig(void)
+{
+#if CONFIG_EB_TOUCH_SWAP_XY
+    return true;
+#else
+    return false;
+#endif
+}
+
+/* Read the GT911 config head (0x8047..) for diagnostics and decide the
+ * software X/Y swap from the chip's own output range. No config is written:
+ * a blank config needs a full 186-byte table upload, which is only worth
+ * doing once the log proves the module really is blank. */
+static void gt911_config_diag(void)
+{
+    uint8_t reg[2] = { 0x80, 0x47 };        /* 0x8047 config version */
+    uint8_t cfg[8] = {0};
+
+    if (i2c_master_transmit_receive(s_tp.dev, reg, 2, cfg, sizeof(cfg), 50) != ESP_OK) {
+        ESP_LOGW(TAG, "GT911 config head read failed");
+        s_tp.swap_xy = tp_swap_kconfig();
+        return;
+    }
+
+    /* Layout: 0=version, 1..2=X output max, 3..4=Y output max,
+     * 5=touch number max, 6=module switch 1 */
+    int xmax = cfg[1] | (cfg[2] << 8);
+    int ymax = cfg[3] | (cfg[4] << 8);
+    ESP_LOGI(TAG, "GT911 config: version=0x%02X Xout=%d Yout=%d "
+             "touch_max=%d module_sw=0x%02X",
+             cfg[0], xmax, ymax, cfg[5], cfg[6]);
+
+    if (cfg[0] == 0x00 || cfg[0] == 0xFF) {
+        ESP_LOGW(TAG, "GT911 config looks blank (version=0x%02X): chip may "
+                 "never report touches - full config upload needed", cfg[0]);
+    }
+
+    /* Orientation: compare the chip's output range with the panel. If the
+     * chip is portrait on a landscape panel (or vice versa) its X/Y come
+     * out swapped and every tap would miss. */
+    bool chip_portrait = (xmax > 0 && ymax > 0) && (xmax < ymax);
+    bool panel_portrait = (EXAMPLE_LCD_H_RES < EXAMPLE_LCD_V_RES);
+    s_tp.swap_xy = tp_swap_kconfig();
+    if (xmax > 0 && ymax > 0 && chip_portrait != panel_portrait) {
+        s_tp.swap_xy = !s_tp.swap_xy;
+        ESP_LOGI(TAG, "chip output %dx%d on %dx%d panel - auto X/Y swap %s",
+                 xmax, ymax, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES,
+                 s_tp.swap_xy ? "ON" : "OFF");
+    }
+}
+
 esp_err_t touch_init(void)
 {
     if (s_tp.chip != TOUCH_CHIP_NONE) {
@@ -259,6 +328,9 @@ esp_err_t touch_init(void)
                          s_tp.chip == TOUCH_CHIP_GT911 ? "GT911" :
                          s_tp.chip == TOUCH_CHIP_FT5X06 ? "FT5x06" : "CST816",
                          s_tp.addr, buses[b].port, buses[b].scl, buses[b].sda);
+                if (s_tp.chip == TOUCH_CHIP_GT911) {
+                    gt911_config_diag();
+                }
                 return ESP_OK;
             }
             ESP_LOGI(TAG, "probe 0x%02X chip %d failed: %s",
@@ -333,6 +405,12 @@ static int tp_read_gt911(touch_point_t *out, int max_out)
         return -1;
     }
     if ((status & 0x80) == 0) {
+        /* Defensive clear (same as the Espressif reference): keeps the
+         * buffer-status flag well defined if a frame is ever missed */
+        if (status != 0) {
+            uint8_t clr[3] = { 0x81, 0x4E, 0x00 };
+            i2c_master_transmit(s_tp.dev, clr, 3, 20);
+        }
         return 0;                       /* no new data */
     }
 
@@ -340,7 +418,10 @@ static int tp_read_gt911(touch_point_t *out, int max_out)
     if (count > 0) {
         uint8_t pts[40];
         int read_n = (count > 5) ? 5 : count;
-        uint8_t pts_reg[2] = { 0x81, 0x50 };   /* 0x8150 first point */
+        /* Point 1 starts at 0x814F: track id, X lo, X hi, Y lo, Y hi,
+         * size lo, size hi, reserved - 8 bytes per point. v2 read from
+         * 0x8150 (X lo), one byte off, and every coordinate was garbage. */
+        uint8_t pts_reg[2] = { 0x81, 0x4F };   /* 0x814F first point */
         if (i2c_master_transmit_receive(s_tp.dev, pts_reg, 2, pts, read_n * 8, 20) == ESP_OK) {
             for (int i = 0; i < read_n && i < max_out; i++) {
                 const uint8_t *p = &pts[i * 8];
@@ -379,9 +460,10 @@ int touch_poll(touch_point_t *out, int max_out)
     for (int i = 0; i < n; i++) {
         int x = out[i].x;
         int y = out[i].y;
-#if CONFIG_EB_TOUCH_SWAP_XY
-        int t = x; x = y; y = t;
-#endif
+        int raw_x = x, raw_y = y;
+        if (s_tp.swap_xy) {
+            int t = x; x = y; y = t;
+        }
         if (x >= EXAMPLE_LCD_H_RES) {
             x = EXAMPLE_LCD_H_RES - 1;
         }
@@ -396,6 +478,17 @@ int touch_poll(touch_point_t *out, int max_out)
 #endif
         out[i].x = tp_normalize(x, EXAMPLE_LCD_H_RES);
         out[i].y = tp_normalize(y, EXAMPLE_LCD_V_RES);
+
+        /* First touches at INFO: raw chip coords + screen coords, so the
+         * boot log alone proves the whole chain works (or shows where it
+         * breaks: raw=0,0 means the chip; raw sane but screen wrong means
+         * orientation/transform). */
+        if (i == 0 && s_tp.dbg_touches < 5) {
+            s_tp.dbg_touches++;
+            ESP_LOGI(TAG, "touch #%d: raw (%d,%d) id=%d -> screen (%d,%d)",
+                     s_tp.dbg_touches, raw_x, raw_y, out[i].id,
+                     out[i].x, out[i].y);
+        }
     }
     return n;
 }
