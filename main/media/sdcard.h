@@ -25,7 +25,10 @@ extern "C" {
  *         re-checked - call sdcard_reprobe() after card hot-plug). */
 esp_err_t sdcard_mount(void);
 
-/** @brief Forget the mounted state so the next sdcard_mount() retries. */
+/** @brief Allow the next sdcard_mount() to retry after a failed attempt.
+ *         No-op while the card is mounted: the live VFS/host/LDO are kept
+ *         (re-acquiring the LDO channel would fail and kill playback) -
+ *         a refresh just re-reads the directory. */
 void sdcard_reprobe(void);
 
 /** @brief true when a card is mounted right now. */

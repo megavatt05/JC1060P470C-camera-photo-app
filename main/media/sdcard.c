@@ -31,8 +31,11 @@ static struct {
 
 esp_err_t sdcard_mount(void)
 {
+    if (s_sd.mounted) {
+        return ESP_OK;      /* VFS/host/LDO live - never re-init under them */
+    }
     if (s_sd.probed) {
-        return s_sd.mounted ? ESP_OK : ESP_FAIL;
+        return ESP_FAIL;    /* previous attempt failed, caller gave up */
     }
     s_sd.probed = true;
 
@@ -89,8 +92,18 @@ esp_err_t sdcard_mount(void)
     return ESP_OK;
 }
 
+/* The refresh button calls this before sd_scan(). While the card is
+ * mounted the VFS, SDMMC host and LDO channel are all alive - tearing
+ * them down here would kill playback and a bare re-acquire of the LDO
+ * channel always fails ("already in use"). So: mounted -> keep
+ * everything, sd_scan() simply re-reads the directory. Only a failed
+ * or never-tried mount clears probed so the next mount retries. */
 void sdcard_reprobe(void)
 {
+    if (s_sd.mounted) {
+        ESP_LOGI(TAG, "reprobe: still mounted, rescan only");
+        return;
+    }
     s_sd.probed = false;
     s_sd.mounted = false;
 }
