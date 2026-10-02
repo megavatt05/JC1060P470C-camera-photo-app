@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash Kit — прошивка ESP32-P4 (cambrowser)</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(160deg,#0b1220 0%,#101b33 55%,#0b1220 100%);
+    color:#e8eefc; font-family:"Segoe UI",Roboto,Arial,sans-serif; padding:24px;
+  }
+  .card { width:100%; max-width:640px; background:#131f38; border:1px solid #24365e;
+    border-radius:18px; padding:28px 30px; box-shadow:0 18px 50px rgba(0,0,0,.45); }
+  h1 { font-size:21px; margin:0 0 6px; }
+  .sub { color:#9db1d9; font-size:13.5px; line-height:1.55; margin:0 0 20px; }
+  a.btn { display:block; text-align:center; padding:15px 18px; font-size:16.5px; font-weight:700;
+    color:#071224; background:linear-gradient(90deg,#57d0ff,#3f8cff); border-radius:12px;
+    text-decoration:none; margin-bottom:12px; }
+  a.btn:hover { filter:brightness(1.08); }
+  ul { list-style:none; padding:0; margin:14px 0 0; font-size:14px; }
+  li { margin:9px 0; }
+  a { color:#6fc3ff; text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .note { color:#8fa2c9; font-size:12.5px; line-height:1.6; margin-top:16px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Прошивка ESP32-P4 — cambrowser a779300</h1>
+  <p class="sub">Браузер + видео + каталог ФИЛЬМЫ (archive.org) + фикс краша после видео.<br>
+  Платa JC1060P470C, кабель USB-C, порт COM10.</p>
+  <a class="btn" href="web_flasher_cambrowser.html">ПОДКЛЮЧИТЬ И ПРОШИТЬ →</a>
+  <ul>
+    <li><a href="FLASH_GUIDE_RU.md">Полная инструкция (подключение, 4 способа, альтернативы)</a></li>
+    <li><a href="https://github.com/megavatt05/JC1060P470C-camera-photo-app/releases/tag/flash-kit-v1">Скачать файлами (Release flash-kit-v1)</a></li>
+    <li><a href="https://github.com/megavatt05/JC1060P470C-camera-photo-app/tree/feature/ethernet-browser/docs/flash">Исходники комплекта в репозитории</a></li>
+  </ul>
+  <p class="note">Прошивка зашита в страницу: ничего выбирать не нужно. Требуется Chrome/Edge
+  на ПК (Web Serial). Галочку «Erase device» не ставьте — сохранятся закладки браузера.</p>
+</div>
+</body>
+</html>
