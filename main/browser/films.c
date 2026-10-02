@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -835,7 +837,17 @@ films_play_err_t films_probe_url(const char *url, uint16_t *out_w, uint16_t *out
     if (url == NULL || strncasecmp(url, "http", 4) != 0) {
         return FILMS_PLAY_OK;   /* local file: nothing to check */
     }
-    return mp4_walk(url, out_w, out_h);
+    films_play_err_t r = mp4_walk(url, out_w, out_h);
+    if (r == FILMS_ERR_NET) {
+        /* archive.org nodes occasionally drop the follow-up connection
+         * outright (instant TLS failure right after a good 64 KB read).
+         * One clean retry turns most of those false rejects into plays;
+         * genuine profile/codec verdicts are NOT retried. */
+        ESP_LOGW(TAG, "probe: transient net failure, retrying once");
+        vTaskDelay(pdMS_TO_TICKS(800));
+        r = mp4_walk(url, out_w, out_h);
+    }
+    return r;
 }
 
 /* ------------------------------------------------------------------ */

@@ -195,6 +195,7 @@ static esp_err_t create_audio_render(void)
 
 static void destroy_video_render(void)
 {
+    esp_log_level_set("VIDEO_RENDER", (esp_log_level_t)CONFIG_LOG_DEFAULT_LEVEL);
     if (s_mp.video_render != NULL) {
         esp_video_render_destroy(s_mp.video_render);
         s_mp.video_render = NULL;
@@ -274,13 +275,22 @@ static esp_err_t create_video_render(void)
         destroy_video_render();
         return ESP_FAIL;
     }
+
+    /* esp_video_render logs a WARN per late frame ("Write too slow reset rate
+     * control") whenever the stream runs slower than realtime - hundreds of
+     * lines per minute that each cost CPU on the render core and flood the
+     * /log ring. The buffering events + busy card already carry that info:
+     * silence the tag for the playback window, restore on teardown. */
+    esp_log_level_set("VIDEO_RENDER", ESP_LOG_ERROR);
     return ESP_OK;
 }
 
 static void player_teardown(void)
 {
     if (s_mp.player != NULL) {
-        esp_player_set_event_cb(s_mp.player, NULL, NULL);
+        /* NB: no esp_player_set_event_cb(NULL) here - the player rejects it
+         * while PLAYING ("Failed to set event cb. state: 2") and the callback
+         * only touches static s_mp fields, so it is safe until deinit. */
         esp_player_stop(s_mp.player);
         esp_player_deinit(s_mp.player);
         s_mp.player = NULL;
@@ -322,6 +332,22 @@ static esp_err_t player_start(const char *url, bool video)
         goto fail;
     }
     esp_player_set_event_cb(s_mp.player, player_event_cb, NULL);
+
+    /* The built-in demux pool is 100 KB for video (player_defaults_cfg.h).
+     * On a typical archive.org stream it saturates at ~140 ms buffered while
+     * the re-buffering gate waits for 300 ms, so the gate gives up and
+     * disables itself for the stream ("Demux pool saturated ... disabling
+     * the re-buffering gate") - playback then free-runs starved and every
+     * late frame logs "Write too slow" from the video render. 512 KB of
+     * PSRAM holds seconds of stream data, the gate actually reaches its
+     * resume threshold and network jitter gets smoothed out. Allowed in
+     * IDLE/STOPPED/FINISHED only - right after init is exactly that. */
+    esp_player_buffer_config_t bcfg = {
+        .extractor_pool_size = 512 * 1024,
+    };
+    if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {
+        ESP_LOGW(TAG, "buffer cfg override failed, keeping built-in defaults");
+    }
 
     /* esp_player pins video_decoder to core 0 by default, so the CPU-bound
      * SW H264 decode (tinyh264) starves IDLE0 -> task watchdog dumps and
