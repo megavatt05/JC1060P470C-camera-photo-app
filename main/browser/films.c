@@ -21,7 +21,10 @@
 
 static const char *TAG = "films";
 
-#define MOOV_MAX        (4u << 20)  /* 4 MB is plenty even for a 2-hour film  */
+#define MOOV_MAX        (12u << 20) /* 12 MB, transient SPIRAM alloc freed right
+                                     * after inspection; 4 MB tripped on real
+                                     * files (560 MB remuxes carry 4+ MB of
+                                     * stsz/stco/ctts tables) */
 #define FIRST_CHUNK     (64 * 1024)
 
 /* progress callback (see films.h): lets the UI animate a busy card while
@@ -752,7 +755,9 @@ static films_play_err_t mp4_walk(const char *url, uint16_t *out_w, uint16_t *out
         if (moov_off >= 0) {
             /* moov starts inside the first chunk but spills past it */
             if (moov_size > MOOV_MAX) {
-                verdict = FILMS_ERR_NET;
+                ESP_LOGW(TAG, "moov index %llu bytes > %u MB limit - rejected locally, not net",
+                         (unsigned long long)moov_size, (unsigned)(MOOV_MAX >> 20));
+                verdict = FILMS_ERR_BIG_MOOV;
                 break;
             }
             uint8_t *moov = heap_caps_malloc((size_t)moov_size, MALLOC_CAP_SPIRAM);
@@ -806,8 +811,14 @@ static films_play_err_t mp4_walk(const char *url, uint16_t *out_w, uint16_t *out
             }
             box_pos += sz;
         }
-        if (m_moov < 0 || m_size > MOOV_MAX) {
+        if (m_moov < 0) {
             verdict = FILMS_ERR_NO_MP4;
+            break;
+        }
+        if (m_size > MOOV_MAX) {
+            ESP_LOGW(TAG, "moov index %llu bytes > %u MB limit - rejected locally, not net",
+                     (unsigned long long)m_size, (unsigned)(MOOV_MAX >> 20));
+            verdict = FILMS_ERR_BIG_MOOV;
             break;
         }
         uint8_t *moov = heap_caps_malloc((size_t)m_size, MALLOC_CAP_SPIRAM);
@@ -857,6 +868,7 @@ const char *films_err_str(films_play_err_t e)
     switch (e) {
     case FILMS_PLAY_OK:       return "ok";
     case FILMS_ERR_NET:       return "сервер не ответил";
+    case FILMS_ERR_BIG_MOOV:  return "индекс файла слишком велик";
     case FILMS_ERR_NO_RESULT: return "ничего не найдено";
     case FILMS_ERR_NO_MP4:    return "нет mp4-версии";
     case FILMS_ERR_NO_RANGE:  return "сервер без докачки";

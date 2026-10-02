@@ -44,6 +44,7 @@ typedef struct {
 typedef enum {
     FILMS_PLAY_OK = 0,
     FILMS_ERR_NET,          /* search/metadata/probe transport failure */
+    FILMS_ERR_BIG_MOOV,     /* moov index exceeds the probe fetch limit */
     FILMS_ERR_NO_RESULT,
     FILMS_ERR_NO_MP4,       /* item has no .mp4 derivative             */
     FILMS_ERR_NO_RANGE,     /* server ignored the Range request        */
