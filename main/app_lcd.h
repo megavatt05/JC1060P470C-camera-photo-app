@@ -75,4 +75,15 @@ void app_lcd_get_fb(int index, void **out_fb);
  */
 void app_lcd_flush(int index);
 
+/**
+ * @brief Panel handle for consumers that drive the panel themselves
+ *        (the video player's render backend). NULL before app_lcd_init().
+ */
+esp_lcd_panel_handle_t app_lcd_get_panel(void);
+
+/**
+ * @brief DBI panel IO handle (command channel); NULL before app_lcd_init().
+ */
+esp_lcd_panel_io_handle_t app_lcd_get_io(void);
+
 #endif

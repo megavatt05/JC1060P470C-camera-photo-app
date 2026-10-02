@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <strings.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -30,6 +31,9 @@
 #include "browser/web_client.h"
 #include "browser/html_text.h"
 #include "browser/browser.h"
+#if CONFIG_EB_MEDIA_ENABLE
+#include "media/media_player.h"
+#endif
 
 static const char *TAG = "browser";
 
@@ -62,7 +66,8 @@ static const char *TAG = "browser";
 #define KEY_VGAP        2
 #define KB_KEY_SCALE    4
 
-/* Button ids */
+/* Button ids. All stay below BTN_CHAR (0x20): ids >= BTN_CHAR are
+ * literal keyboard codepoints. */
 enum {
     BTN_NONE = 0,
     BTN_GO = 1,
@@ -75,6 +80,16 @@ enum {
     BTN_DOWN,
     BTN_KBD,
     BTN_URLROW,
+    BTN_RADIO,
+    BTN_VIDEO,
+    BTN_MSTOP,
+    BTN_MPAUSE,
+    BTN_VOLUP,
+    BTN_VOLDN,
+    BTN_MBACK,
+    BTN_MURL,
+    BTN_STATION,            /* + 0..RADIO_STATIONS_N-1 */
+    BTN_VIDPRESET,          /* + 0..VIDEO_PRESETS_N-1 */
     BTN_CHAR = 0x20,        /* ids >= BTN_CHAR are literal chars */
 };
 
@@ -85,6 +100,12 @@ typedef enum {
     ST_RESULTS,
     ST_PAGELOAD,
     ST_PAGE,
+#if CONFIG_EB_MEDIA_ENABLE
+    ST_RADIO,               /* radio screen (stations + controls)      */
+    ST_VIDEO,               /* video screen (presets + custom URL)     */
+    ST_URLIN,               /* keyboard: type a media URL              */
+    ST_VIDEOP,              /* video playing: the render owns the panel */
+#endif
 } browser_state_t;
 
 /* --- Static data ---------------------------------------------------------- */
@@ -109,6 +130,9 @@ static struct {
     int line_count;
 
     int splash_attempts;
+#if CONFIG_EB_MEDIA_ENABLE
+    bool urlin_video;       /* ST_URLIN target: false=radio true=video  */
+#endif
 } br;
 
 /* --- Wrapping ------------------------------------------------------------- */
@@ -194,6 +218,11 @@ static void draw_status_bar(uint16_t *fb)
     }
     snprintf(right, sizeof(right), "[%s] touch:%s",
              br.engine_google ? "GGL" : "DDG", touch_chip_name());
+#if CONFIG_EB_MEDIA_ENABLE
+    if (media_get_state() == MEDIA_STATE_PLAYING && !media_video_active()) {
+        strlcat(right, " R", sizeof(right));    /* radio plays in background */
+    }
+#endif
 
     ui_text(fb, LCD_W, LCD_H, 8, (BAR_H - UI_FONT_H) / 2,
             left, 1, UI_COLOR_OK, UI_COLOR_BAR);
@@ -326,8 +355,16 @@ static const char *kb_bottom_label(size_t i)
     if (kb_bottom[i].label != NULL) {
         return kb_bottom[i].label;
     }
-    return kb_bottom[i].id == BTN_KBD ? (br.kb_ru ? "RU" : "EN")
-                                      : (br.engine_google ? "GGL" : "DDG");
+    if (kb_bottom[i].id == BTN_KBD) {
+        return br.kb_ru ? "RU" : "EN";
+    }
+#if CONFIG_EB_MEDIA_ENABLE
+    /* on the media URL input screen the engine slot doubles as CANCEL */
+    if (kb_bottom[i].id == BTN_ENGINE && br.state == ST_URLIN) {
+        return "НАЗАД";
+    }
+#endif
+    return br.engine_google ? "GGL" : "DDG";
 }
 
 static int kb_bottom_x0(void)
@@ -419,6 +456,260 @@ static int keyboard_hit(int x, int y)
 
 static void draw_screen(void);
 
+#if CONFIG_EB_MEDIA_ENABLE
+
+/* --- Media: internet radio + video (see media/media_player.h) --------------- */
+
+static void draw_loading(uint16_t *fb, const char *what);
+
+static const struct { const char *name; const char *url; } radio_stations[] = {
+    { "Европа Плюс",    "http://ep128server.streamr.ru:8030/ep128" },
+    { "Радио Рекорд",   "http://air.radiorecord.ru:805/rr_320" },
+    { "Дорожное радио", "http://dorognoe.hostingradio.ru:8000/rodio" },
+    { "Радио Дача",     "http://dacha.hostingradio.ru:8025/radiodacha96.aacp" },
+    { "SomaFM Groove",  "https://ice1.somafm.com/groovesalad-128-mp3" },
+    { "Radio Paradise", "http://stream.radioparadise.com/mp3-128" },
+};
+#define RADIO_STATIONS_N (sizeof(radio_stations) / sizeof(radio_stations[0]))
+
+static const struct { const char *name; const char *url; } video_presets[] = {
+    { "Big Buck Bunny 360p",  "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4" },
+    { "Big Buck Bunny 720p",  "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4" },
+    { "For Bigger Blazes HD", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4" },
+};
+#define VIDEO_PRESETS_N (sizeof(video_presets) / sizeof(video_presets[0]))
+
+/* HOME: two app launcher buttons in the content zone */
+static const ui_button_t home_apps[] = {
+    { 110, 150, 360, 110, "РАДИО", BTN_RADIO, 3 },
+    { 554, 150, 360, 110, "ВИДЕО", BTN_VIDEO, 3 },
+};
+#define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
+
+static bool home_apps_hit(int x, int y, int *out_id)
+{
+    for (size_t i = 0; i < HOME_APPS_N; i++) {
+        if (ui_button_hit(&home_apps[i], x, y)) {
+            *out_id = home_apps[i].id;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Radio: station tile geometry, shared by draw and hit-test */
+
+static void radio_st_btn(int i, ui_button_t *b)
+{
+    b->x = (i & 1) ? 516 : 12;
+    b->y = 88 + (i >> 1) * 80;
+    b->w = 496;
+    b->h = 72;
+    b->label = radio_stations[i].name;
+    b->id = (int)(BTN_STATION + i);
+    b->scale = 3;
+}
+
+static bool media_url_norm(const char *in, char *out, size_t outsz)
+{
+    while (*in == ' ') {
+        in++;
+    }
+    if (*in == '\0') {
+        return false;
+    }
+    if (strncasecmp(in, "http://", 7) != 0 && strncasecmp(in, "https://", 8) != 0) {
+        snprintf(out, outsz, "http://%s", in);
+    } else {
+        snprintf(out, outsz, "%s", in);
+    }
+    return true;
+}
+
+static void draw_radio(uint16_t *fb)
+{
+    draw_status_bar(fb);
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H, LCD_W, LCD_H, UI_COLOR_BG);
+
+    ui_text(fb, LCD_W, LCD_H, 12, 44, "РАДИО", UI_SCALE_TITLE, UI_COLOR_ACCENT, UI_COLOR_BG);
+    char st[48];
+    snprintf(st, sizeof(st), "%s  ЗВУК:%d", media_state_str(), media_get_volume());
+    ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(st, UI_SCALE_TEXT) - 12,
+            52, st, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
+
+    for (size_t i = 0; i < RADIO_STATIONS_N; i++) {
+        ui_button_t b;
+        radio_st_btn((int)i, &b);
+        ui_button(fb, LCD_W, LCD_H, &b, false);
+        /* highlight the station whose stream is loaded right now */
+        if (media_get_state() != MEDIA_STATE_IDLE &&
+            strcmp(media_get_url(), radio_stations[i].url) == 0) {
+            ui_frame(fb, LCD_W, LCD_H, b.x - 3, b.y - 3, b.x + b.w + 3, b.y + b.h + 3,
+                     2, UI_COLOR_OK);
+        }
+    }
+
+    static const struct { int w; int id; } ctrls[] = {
+        { 180, BTN_VOLDN }, { 220, BTN_MPAUSE }, { 180, BTN_VOLUP }, { 220, BTN_MSTOP },
+    };
+    int x = (LCD_W - (180 + 220 + 180 + 220 + 3 * 12)) / 2;
+    for (size_t i = 0; i < sizeof(ctrls) / sizeof(ctrls[0]); i++) {
+        const char *lab = "ПАУЗА";
+        if (ctrls[i].id == BTN_VOLDN)  lab = "ТИШЕ-";
+        if (ctrls[i].id == BTN_VOLUP)  lab = "ГРОМЧЕ+";
+        if (ctrls[i].id == BTN_MPAUSE) lab = (media_get_state() == MEDIA_STATE_PAUSED) ? "ПУСК" : "ПАУЗА";
+        if (ctrls[i].id == BTN_MSTOP)  lab = "СТОП";
+        ui_button_t b = { x, 336, ctrls[i].w, 64, lab, ctrls[i].id, 3 };
+        ui_button(fb, LCD_W, LCD_H, &b, false);
+        x += ctrls[i].w + 12;
+    }
+
+    ui_button_t back = { 372, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
+    ui_button(fb, LCD_W, LCD_H, &back, false);
+
+    if (media_get_state() != MEDIA_STATE_IDLE && media_get_url()[0] != '\0') {
+        char fitted[128];
+        ui_text_fit(fitted, sizeof(fitted), media_get_url(), LCD_W - 24, 1);
+        ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(fitted, 1)) / 2,
+                500, fitted, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+    }
+}
+
+static int radio_hit(int x, int y)
+{
+    for (size_t i = 0; i < RADIO_STATIONS_N; i++) {
+        ui_button_t b;
+        radio_st_btn((int)i, &b);
+        if (ui_button_hit(&b, x, y)) {
+            return b.id;
+        }
+    }
+    static const struct { int w; int id; } ctrls[] = {
+        { 180, BTN_VOLDN }, { 220, BTN_MPAUSE }, { 180, BTN_VOLUP }, { 220, BTN_MSTOP },
+    };
+    int cx = (LCD_W - (180 + 220 + 180 + 220 + 3 * 12)) / 2;
+    for (size_t i = 0; i < sizeof(ctrls) / sizeof(ctrls[0]); i++) {
+        if (x >= cx && x < cx + ctrls[i].w && y >= 336 && y < 336 + 64) {
+            return ctrls[i].id;
+        }
+        cx += ctrls[i].w + 12;
+    }
+    ui_button_t back = { 372, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
+    if (ui_button_hit(&back, x, y)) {
+        return BTN_MBACK;
+    }
+    return BTN_NONE;
+}
+
+static void video_preset_btn(int i, ui_button_t *b)
+{
+    b->x = 12;
+    b->y = 92 + i * 84;
+    b->w = LCD_W - 24;
+    b->h = 76;
+    b->label = video_presets[i].name;
+    b->id = (int)(BTN_VIDPRESET + i);
+    b->scale = 3;
+}
+
+static void draw_video(uint16_t *fb)
+{
+    draw_status_bar(fb);
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H, LCD_W, LCD_H, UI_COLOR_BG);
+
+    ui_text(fb, LCD_W, LCD_H, 12, 44, "ВИДЕО", UI_SCALE_TITLE, UI_COLOR_ACCENT, UI_COLOR_BG);
+
+    for (size_t i = 0; i < VIDEO_PRESETS_N; i++) {
+        ui_button_t b;
+        video_preset_btn((int)i, &b);
+        ui_button(fb, LCD_W, LCD_H, &b, false);
+    }
+
+    ui_button_t url = { 264, 356, 496, 64, "СВОЙ URL", BTN_MURL, 3 };
+    ui_button(fb, LCD_W, LCD_H, &url, false);
+
+    ui_button_t back = { 372, 436, 280, 56, "НАЗАД", BTN_MBACK, 3 };
+    ui_button(fb, LCD_W, LCD_H, &back, false);
+
+    const char *hint = "MP4 (H.264 + AAC) по HTTP/HTTPS";
+    ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, 1)) / 2,
+            508, hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+}
+
+static int video_hit(int x, int y)
+{
+    for (size_t i = 0; i < VIDEO_PRESETS_N; i++) {
+        ui_button_t b;
+        video_preset_btn((int)i, &b);
+        if (ui_button_hit(&b, x, y)) {
+            return b.id;
+        }
+    }
+    ui_button_t url = { 264, 356, 496, 64, "СВОЙ URL", BTN_MURL, 3 };
+    if (ui_button_hit(&url, x, y)) {
+        return BTN_MURL;
+    }
+    ui_button_t back = { 372, 436, 280, 56, "НАЗАД", BTN_MBACK, 3 };
+    if (ui_button_hit(&back, x, y)) {
+        return BTN_MBACK;
+    }
+    return BTN_NONE;
+}
+
+static void draw_urlin(uint16_t *fb)
+{
+    draw_status_bar(fb);
+    draw_url_row(fb);
+
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, CONTENT_Y1, UI_COLOR_BG);
+    const char *target = br.urlin_video ? "адрес видео (MP4):" : "адрес потока (MP3/AAC):";
+    ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 8, target, UI_SCALE_TEXT,
+            UI_COLOR_URL, UI_COLOR_BG);
+    const char *hint = "GO внизу или справа - начать";
+    ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(hint, 1) - 12, CONTENT_Y0 + 8,
+            hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+
+    draw_keyboard(fb);
+}
+
+/* Start a video (preset or custom URL): loading frame first, then hand
+ * the panel over to the render on success. */
+static void video_start_ui(const char *url)
+{
+    void *fb = NULL;
+    app_lcd_get_fb(br.fb_idx, &fb);
+    if (fb != NULL) {
+        draw_loading(fb, "видео");
+        app_lcd_flush(br.fb_idx);
+        br.fb_idx ^= 1;
+    }
+    if (media_video_start(url) == ESP_OK) {
+        br.state = ST_VIDEOP;       /* no UI drawing until playback stops */
+    } else {
+        br.state = ST_VIDEO;
+        draw_screen();
+    }
+}
+
+/* GO pressed on the URL-input screen (or the keyboard GO): apply the URL */
+static void urlin_apply(void)
+{
+    char url[128];
+    if (!media_url_norm(br.query, url, sizeof(url))) {
+        return;
+    }
+    if (br.urlin_video) {
+        video_start_ui(url);
+    } else {
+        media_radio_start(url);
+        br.state = ST_RADIO;
+        draw_screen();
+    }
+}
+
+#endif /* CONFIG_EB_MEDIA_ENABLE */
+
+
 static void draw_splash(uint16_t *fb)
 {
     ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, LCD_H, UI_COLOR_BG);
@@ -447,10 +738,20 @@ static void draw_home(uint16_t *fb)
     draw_url_row(fb);
 
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, CONTENT_Y1, UI_COLOR_BG);
+
+#if CONFIG_EB_MEDIA_ENABLE
+    for (size_t i = 0; i < HOME_APPS_N; i++) {
+        ui_button(fb, LCD_W, LCD_H, &home_apps[i], false);
+    }
+    const char *hint = "поиск: введите запрос и нажмите GO";
+    ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
+            296, hint, UI_SCALE_TEXT, UI_COLOR_BORDER, UI_COLOR_BG);
+#else
     const char *hint = "type a search query, then GO";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
             (CONTENT_Y0 + CONTENT_Y1) / 2 - 8, hint, UI_SCALE_TEXT,
             UI_COLOR_BORDER, UI_COLOR_BG);
+#endif
 
     draw_keyboard(fb);
 }
@@ -549,6 +850,15 @@ static void draw_loading(uint16_t *fb, const char *what)
 
 static void draw_screen(void)
 {
+#if CONFIG_EB_MEDIA_ENABLE
+    /* hard guard: while a video is playing the esp_video_render LCD backend
+     * owns the DPI frame buffers - any UI write/flush here would corrupt
+     * the playback (or crash on a torn double-buffer flip) */
+    if (br.state == ST_VIDEOP && media_video_active()) {
+        return;
+    }
+#endif
+
     void *fb = NULL;
     app_lcd_get_fb(br.fb_idx, &fb);
     if (fb == NULL) {
@@ -562,6 +872,12 @@ static void draw_screen(void)
     case ST_RESULTS:  draw_results(fb);      break;
     case ST_PAGELOAD: draw_loading(fb, "loading");    break;
     case ST_PAGE:     draw_page(fb);         break;
+#if CONFIG_EB_MEDIA_ENABLE
+    case ST_RADIO:    draw_radio(fb);        break;
+    case ST_VIDEO:    draw_video(fb);        break;
+    case ST_URLIN:    draw_urlin(fb);        break;
+    case ST_VIDEOP:   /* render owns the panel - nothing to draw */ break;
+#endif
     }
 
     app_lcd_flush(br.fb_idx);
@@ -679,13 +995,33 @@ static void browser_task(void *arg)
 
         case ST_HOME:
             if (tap) {
-                int id = (urlrow_go_hit(tap_x, tap_y) && br.query[0] != '\0')
-                         ? BTN_GO : keyboard_hit(tap_x, tap_y);
+                int id = BTN_NONE;
+                if (urlrow_go_hit(tap_x, tap_y) && br.query[0] != '\0') {
+                    id = BTN_GO;
+                }
+#if CONFIG_EB_MEDIA_ENABLE
+                else if (home_apps_hit(tap_x, tap_y, &id)) {
+                    /* id filled by the helper */
+                }
+#endif
+                else {
+                    id = keyboard_hit(tap_x, tap_y);
+                }
                 if (id >= BTN_CHAR) {
                     query_append_cp((uint32_t)id);
                     draw_screen();
                 } else {
                     switch (id) {
+#if CONFIG_EB_MEDIA_ENABLE
+                    case BTN_RADIO:
+                        br.state = ST_RADIO;
+                        draw_screen();
+                        break;
+                    case BTN_VIDEO:
+                        br.state = ST_VIDEO;
+                        draw_screen();
+                        break;
+#endif
                     case BTN_KBD:
                         br.kb_ru = !br.kb_ru;
                         draw_screen();
@@ -778,6 +1114,138 @@ static void browser_task(void *arg)
                 }
             }
             break;
+
+#if CONFIG_EB_MEDIA_ENABLE
+        case ST_RADIO:
+            if (tap) {
+                int id = radio_hit(tap_x, tap_y);
+                if (id >= BTN_STATION && id < (int)(BTN_STATION + RADIO_STATIONS_N)) {
+                    media_radio_start(radio_stations[id - BTN_STATION].url);
+                    draw_screen();
+                } else {
+                    switch (id) {
+                    case BTN_MPAUSE:
+                        if (media_get_state() == MEDIA_STATE_PAUSED) {
+                            media_resume();
+                        } else {
+                            media_pause();
+                        }
+                        draw_screen();
+                        break;
+                    case BTN_MSTOP:
+                        media_stop();
+                        draw_screen();
+                        break;
+                    case BTN_VOLDN:
+                        media_set_volume(media_get_volume() - 10);
+                        draw_screen();
+                        break;
+                    case BTN_VOLUP:
+                        media_set_volume(media_get_volume() + 10);
+                        draw_screen();
+                        break;
+                    case BTN_MURL:
+                        br.urlin_video = false;
+                        br.query[0] = '\0';
+                        br.state = ST_URLIN;
+                        draw_screen();
+                        break;
+                    case BTN_MBACK:
+                        br.state = ST_HOME;
+                        draw_screen();
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+
+        case ST_VIDEO:
+            if (tap) {
+                int id = video_hit(tap_x, tap_y);
+                if (id >= BTN_VIDPRESET && id < (int)(BTN_VIDPRESET + VIDEO_PRESETS_N)) {
+                    video_start_ui(video_presets[id - BTN_VIDPRESET].url);
+                } else {
+                    switch (id) {
+                    case BTN_MURL:
+                        br.urlin_video = true;
+                        br.query[0] = '\0';
+                        br.state = ST_URLIN;
+                        draw_screen();
+                        break;
+                    case BTN_MBACK:
+                        br.state = ST_HOME;
+                        draw_screen();
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+
+        case ST_URLIN:
+            if (tap) {
+                if (urlrow_go_hit(tap_x, tap_y) && br.query[0] != '\0') {
+                    urlin_apply();
+                } else {
+                    int id = keyboard_hit(tap_x, tap_y);
+                    if (id >= BTN_CHAR) {
+                        query_append_cp((uint32_t)id);
+                        draw_screen();
+                    } else {
+                        switch (id) {
+                        case BTN_ENGINE:    /* НАЗАД on this screen */
+                            br.state = br.urlin_video ? ST_VIDEO : ST_RADIO;
+                            draw_screen();
+                            break;
+                        case BTN_KBD:
+                            br.kb_ru = !br.kb_ru;
+                            draw_screen();
+                            break;
+                        case BTN_DEL: {
+                            size_t len = strlen(br.query);
+                            while (len > 0 &&
+                                   (((unsigned char)br.query[len - 1]) & 0xC0) == 0x80) {
+                                len--;
+                            }
+                            if (len > 0) {
+                                br.query[len - 1] = '\0';
+                            }
+                            draw_screen();
+                            break;
+                        }
+                        case BTN_SPC:
+                            query_append_cp(' ');
+                            draw_screen();
+                            break;
+                        case BTN_GO:
+                            urlin_apply();
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+
+        case ST_VIDEOP:
+            /* the render owns the panel: no UI drawing in this state */
+            if (media_get_state() == MEDIA_STATE_FINISHED ||
+                media_get_state() == MEDIA_STATE_ERROR ||
+                media_video_active() == false) {
+                media_stop();
+                br.state = ST_VIDEO;
+                draw_screen();
+            } else if (tap) {
+                media_stop();
+                br.state = ST_VIDEO;
+                draw_screen();
+            }
+            break;
+#endif
 
         default:
             break;

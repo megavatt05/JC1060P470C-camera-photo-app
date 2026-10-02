@@ -132,6 +132,57 @@ menu "CamBrowser (Ethernet Browser on LCD)"
         default 384
         range 64 1024
 
+    menu "Audio / Media (radio and video player)"
+        # Pin defaults are the JC1060P470C board wiring (verified against
+        # working ESPHome/Espressif configs for this exact board):
+        # ES8311 codec on the touch I2C bus (SDA 7 / SCL 8), I2S data pins
+        # 9/10/12/13, NS4150-class power amplifier enable on GPIO11.
+        config EB_MEDIA_ENABLE
+            bool "Enable radio and video player (media subsystem)"
+            default y
+            help
+              Compiles main/media/ (esp_player + ES8311 audio out). Disabling
+              it builds the plain browser without the media stack.
+
+        config EB_AUDIO_I2S_PORT
+            int "I2S port for the audio output"
+            default 0
+
+        config EB_AUDIO_I2S_DOUT
+            int "I2S DOUT (data to codec) GPIO"
+            default 9
+
+        config EB_AUDIO_I2S_LRCK
+            int "I2S LRCK / word select GPIO"
+            default 10
+
+        config EB_AUDIO_I2S_BCLK
+            int "I2S BCLK GPIO"
+            default 12
+
+        config EB_AUDIO_I2S_MCLK
+            int "I2S MCLK GPIO (-1 = not wired)"
+            default 13
+
+        config EB_AUDIO_PA_GPIO
+            int "Speaker power amplifier enable GPIO (-1 = always on)"
+            default 11
+            help
+              NS4150-class amplifier enable line of the board. Driven to the
+              active level while audio is open.
+
+        config EB_AUDIO_PA_ACTIVE_HIGH
+            bool "Speaker amplifier enable is active high"
+            default y
+
+        config EB_AUDIO_CODEC_ADDR
+            hex "ES8311 I2C address (8-bit write address)"
+            default 0x30
+            help
+              ES8311 at ADDR pin low answers at 7-bit 0x18, which is 0x30
+              in the 8-bit write convention used by esp_codec_dev.
+    endmenu
+
 endmenu
 
 menu "Example Boards Types"

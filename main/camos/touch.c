@@ -502,3 +502,11 @@ const char *touch_chip_name(void)
     default:                 return "none";
     }
 }
+
+void *touch_get_i2c_bus(void)
+{
+    /* Shared with the audio codec (ES8311 sits on the same bus as GT911).
+     * NULL when touch_init() never created a bus, in which case the audio
+     * driver creates its own on the same pins. */
+    return (void *)s_tp.bus;
+}

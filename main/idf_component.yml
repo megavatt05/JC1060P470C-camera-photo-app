@@ -14,3 +14,40 @@ dependencies:
   espressif/esp_lcd_jd9365: "^1.0.2"
   espressif/esp_lcd_jd9165: "*"
   espressif/esp_lcd_st7701: "*"
+
+  # --- Media: internet radio + video playback (main/media/) ---
+  # esp_player (esp-gmf) demux -> decode -> render stack, pinned to the
+  # 1.0.x line for a reason: gmf_audio 1.1 pulls esp_audio_effects 1.4+,
+  # whose prebuilt P4 library requires chip revision >= 3.0, while this
+  # board is an ESP32-P4 rev v1.3. The 1.0.x line uses esp_audio_effects
+  # ~1.3 (no rev gate) and esp_codec_dev ^1.4 (stable 1.6.x API).
+  # Transitive components are listed explicitly (like the upstream
+  # examples do) so a cold first configure resolves without $CONFIG
+  # matches conditions.
+  espressif/esp_player:
+    version: "1.0.7"
+  espressif/esp_audio_render:
+    version: "1.0.0"
+  espressif/esp_video_render:
+    version: "1.0.0"
+  espressif/esp_video_codec:
+    version: "~0.5"
+  espressif/esp_extractor:
+    version: "~1.0"
+  espressif/gmf_core:
+    version: "1.0.2"
+  espressif/gmf_audio:
+    version: "1.0.1"
+  espressif/gmf_video:
+    version: "1.0.3"
+  espressif/gmf_io:
+    version: "1.0.0"
+  # ES8311 codec driver + I2S/I2C device layer for the board speaker.
+  # Pinned exact: the stable 1.6.2 API. ("^1.6" would still admit the
+  # 2.0.0-beta pre-releases, which have a different, unstable API - semver
+  # orders 2.0.0-beta5 below 2.0.0.)
+  espressif/esp_codec_dev:
+    version: "1.6.2"
+  # Memory adapter used by the gmf media components.
+  espressif/media_lib_sal:
+    version: "~1.0"

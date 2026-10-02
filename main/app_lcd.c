@@ -600,3 +600,13 @@ void app_lcd_flush(int index)
                               EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES,
                               s_panel_fb[index]);
 }
+
+esp_lcd_panel_handle_t app_lcd_get_panel(void)
+{
+    return display_handle;
+}
+
+esp_lcd_panel_io_handle_t app_lcd_get_io(void)
+{
+    return mipi_dbi_io;
+}

@@ -48,6 +48,15 @@ int touch_poll(touch_point_t *out, int max_out);
 /** @brief Chip name for the status bar: "GT911"/"FT5x06"/"CST816"/"none" */
 const char *touch_chip_name(void);
 
+/**
+ * @brief I2C master bus handle created by touch_init() (i2c_master_bus_handle_t).
+ *
+ * The board wires the ES8311 audio codec on the same bus as the touch
+ * controller; the audio driver reuses this handle instead of claiming the
+ * port twice. Returns NULL when touch_init() has not created a bus.
+ */
+void *touch_get_i2c_bus(void);
+
 #ifdef __cplusplus
 }
 #endif

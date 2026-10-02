@@ -1,5 +1,7 @@
 # Name,   Type, SubType, Offset,  Size, Flags
-# IDF 6 + P4: partition table @ 0x10000 → first partition >= 0x11000
+# IDF 6 + P4: partition table @ 0x10000 -> first partition >= 0x11000
+# App size raised 2M -> 7M: the media stack (esp_player/gmf + software
+# H.264/AAC/MP3 decoders) adds several hundred KB on top of the browser.
 nvs,      data, nvs,     0x11000, 0x6000,
 phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        0x200000,
+factory,  app,  factory, ,        0x700000,
