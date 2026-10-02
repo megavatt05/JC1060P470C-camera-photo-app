@@ -4,6 +4,10 @@ set(srcs "main.c" "app_lcd.c" "app_overlay.c"
           "browser/web_client.c" "browser/html_text.c" "browser/browser.c"
           "media/media_audio.c" "media/media_player.c" "media/sdcard.c")
 
+if(CONFIG_EB_MEDIA_ENABLE)
+    list(APPEND srcs "browser/films.c")
+endif()
+
 idf_component_register(SRCS "${srcs}"
                        PRIV_INCLUDE_DIRS .
                        PRIV_REQUIRES

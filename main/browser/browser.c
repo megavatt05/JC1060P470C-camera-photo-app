@@ -30,6 +30,7 @@
 #include "camos/touch.h"
 #include "browser/web_client.h"
 #include "browser/html_text.h"
+#include "browser/films.h"
 #include "browser/browser.h"
 #if CONFIG_EB_MEDIA_ENABLE
 #include "media/media_player.h"
@@ -84,6 +85,7 @@ enum {
     BTN_URLROW,
     BTN_RADIO,
     BTN_VIDEO,
+    BTN_FILMS,              /* open the archive.org films catalog  */
     BTN_MSTOP,
     BTN_MPAUSE,
     BTN_VOLUP,
@@ -113,6 +115,8 @@ typedef enum {
     ST_URLIN,               /* keyboard: type a media URL              */
     ST_VIDEOP,              /* video playing: the render owns the panel */
     ST_FILES,               /* media files on the SD card              */
+    ST_FILMS,               /* keyboard: search the films catalog      */
+    ST_FILMSR,              /* films search results                    */
 #endif
 } browser_state_t;
 
@@ -367,8 +371,10 @@ static const char *kb_bottom_label(size_t i)
         return br.kb_ru ? "RU" : "EN";
     }
 #if CONFIG_EB_MEDIA_ENABLE
-    /* on the media URL input screen the engine slot doubles as CANCEL */
-    if (kb_bottom[i].id == BTN_ENGINE && br.state == ST_URLIN) {
+    /* on the media URL / films search screens the engine slot doubles as
+     * CANCEL */
+    if (kb_bottom[i].id == BTN_ENGINE &&
+        (br.state == ST_URLIN || br.state == ST_FILMS)) {
         return "НАЗАД";
     }
 #endif
@@ -494,10 +500,11 @@ static const struct { const char *name; const char *url; } video_presets[] = {
 };
 #define VIDEO_PRESETS_N (sizeof(video_presets) / sizeof(video_presets[0]))
 
-/* HOME: two app launcher buttons in the content zone */
+/* HOME: three app launcher buttons in the content zone */
 static const ui_button_t home_apps[] = {
-    { 110, 150, 360, 110, "РАДИО", BTN_RADIO, 3 },
-    { 554, 150, 360, 110, "ВИДЕО", BTN_VIDEO, 3 },
+    { 20,  150, 320, 110, "РАДИО",  BTN_RADIO, 3 },
+    { 352, 150, 320, 110, "ВИДЕО",  BTN_VIDEO, 3 },
+    { 684, 150, 320, 110, "ФИЛЬМЫ", BTN_FILMS, 3 },
 };
 #define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
 
@@ -923,6 +930,152 @@ static void urlin_apply(void)
     }
 }
 
+/* --- Films: public-domain catalog from archive.org ------------------------- */
+
+static film_item_t film_items[FILMS_MAX];
+static int  films_n;
+static int  films_scroll;
+static char films_msg[96];      /* status line of the results screen */
+
+/* Search the catalog (empty query = "popular" list). Blocking, like
+ * do_search(): a static "..." frame stays on the panel while we wait. */
+static void do_films_search(void)
+{
+    void *fb = NULL;
+    app_lcd_get_fb(br.fb_idx, &fb);
+    if (fb != NULL) {
+        draw_loading(fb, "фильмы");
+        app_lcd_flush(br.fb_idx);
+        br.fb_idx ^= 1;
+    }
+
+    int n = 0;
+    esp_err_t err = films_search(br.query, film_items, FILMS_MAX, &n);
+    films_n = n;
+    films_scroll = 0;
+    if (err != ESP_OK) {
+        strlcpy(films_msg, "поиск не удался (сеть)", sizeof(films_msg));
+    } else if (n == 0) {
+        strlcpy(films_msg, "ничего не найдено (попробуйте EN)", sizeof(films_msg));
+    } else {
+        films_msg[0] = '\0';
+    }
+    br.state = ST_FILMSR;
+    draw_screen();
+}
+
+/* Pick a result: resolve the mp4 derivative, verify the H.264 profile with
+ * a couple of Range reads, only then hand the URL to the player. */
+static void open_film(int idx)
+{
+    if (idx < 0 || idx >= films_n) {
+        return;
+    }
+    void *fb = NULL;
+    app_lcd_get_fb(br.fb_idx, &fb);
+    if (fb != NULL) {
+        /* loading frame shows the title, truncated to fit one line */
+        char what[30];
+        strlcpy(what, film_items[idx].title, sizeof(what));
+        size_t wl = strlen(what);
+        while (wl > 0 && (((unsigned char)what[wl - 1]) & 0xC0) == 0x80) {
+            what[--wl] = '\0';
+        }
+        draw_loading(fb, what);
+        app_lcd_flush(br.fb_idx);
+        br.fb_idx ^= 1;
+    }
+
+    char url[FILMS_URL_MAX];
+    films_play_err_t r = films_resolve(film_items[idx].ident, url, sizeof(url));
+    uint16_t w = 0, h = 0;
+    if (r == FILMS_PLAY_OK) {
+        r = films_probe_url(url, &w, &h);
+    }
+    if (r != FILMS_PLAY_OK) {
+        if (w != 0 && h != 0) {
+            snprintf(films_msg, sizeof(films_msg), "%ux%u: %s",
+                     w, h, films_err_str(r));
+        } else {
+            strlcpy(films_msg, films_err_str(r), sizeof(films_msg));
+        }
+        ESP_LOGW(TAG, "film rejected: %s (%s)", film_items[idx].title, films_msg);
+        br.state = ST_FILMSR;
+        draw_screen();
+        return;
+    }
+    ESP_LOGI(TAG, "film ok %ux%u: %s", w, h, url);
+    videop_back = ST_FILMSR;
+    video_start_ui(url);
+}
+
+static void draw_films(uint16_t *fb)
+{
+    draw_status_bar(fb);
+    draw_url_row(fb);
+
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, CONTENT_Y1, UI_COLOR_BG);
+    const char *target = "каталог кино public-domain (archive.org):";
+    ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 8, target, UI_SCALE_TEXT,
+            UI_COLOR_URL, UI_COLOR_BG);
+    const char *hint = "пустой запрос = популярное";
+    ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(hint, 1) - 12, CONTENT_Y0 + 8,
+            hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+
+    draw_keyboard(fb);
+}
+
+static void draw_filmsr(uint16_t *fb)
+{
+    draw_status_bar(fb);
+    draw_url_row(fb);
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, LCD_H, UI_COLOR_BG);
+
+    if (films_n == 0) {
+        ui_text(fb, LCD_W, LCD_H,
+                (LCD_W - ui_text_width(films_msg, UI_SCALE_TEXT)) / 2,
+                CONTENT_Y0 + 60, films_msg, UI_SCALE_TEXT, UI_COLOR_ERR,
+                UI_COLOR_BG);
+        const char *hint = "нажмите, чтобы вернуться";
+        ui_text(fb, LCD_W, LCD_H,
+                (LCD_W - ui_text_width(hint, 1)) / 2, CONTENT_Y0 + 100,
+                hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+        return;
+    }
+
+    if (films_msg[0] != '\0') {
+        char fitted[96];
+        ui_text_fit(fitted, sizeof(fitted), films_msg, LCD_W - 24, 1);
+        ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 2, fitted, 1,
+                UI_COLOR_ERR, UI_COLOR_BG);
+    }
+
+    int rows = (CONTENT_Y1_FULL - CONTENT_Y0) / ROW_H;
+    for (int i = 0; i < rows; i++) {
+        int idx = films_scroll + i;
+        if (idx >= films_n) {
+            break;
+        }
+        int y = CONTENT_Y0 + i * ROW_H;
+
+        char num[16];
+        snprintf(num, sizeof(num), "%2d.", idx + 1);
+        ui_text(fb, LCD_W, LCD_H, 8, y + 8, num, UI_SCALE_TEXT,
+                UI_COLOR_URL, UI_COLOR_BG);
+
+        char fitted[FILM_TITLE_MAX];
+        ui_text_fit(fitted, sizeof(fitted), film_items[idx].title,
+                    LCD_W - 90, UI_SCALE_TEXT);
+        ui_text(fb, LCD_W, LCD_H, 56, y + 8, fitted, UI_SCALE_TEXT,
+                UI_COLOR_FG, UI_COLOR_BG);
+
+        ui_fill_rect(fb, LCD_W, LCD_H, 8, y + ROW_H - 1, LCD_W - 8, y + ROW_H,
+                     UI_COLOR_BAR);
+    }
+
+    draw_nav_bar(fb);
+}
+
 #endif /* CONFIG_EB_MEDIA_ENABLE */
 
 
@@ -1093,6 +1246,8 @@ static void draw_screen(void)
     case ST_VIDEO:    draw_video(fb);        break;
     case ST_URLIN:    draw_urlin(fb);        break;
     case ST_FILES:    draw_files(fb);        break;
+    case ST_FILMS:    draw_films(fb);        break;
+    case ST_FILMSR:   draw_filmsr(fb);       break;
     case ST_VIDEOP:   /* render owns the panel - nothing to draw */ break;
 #endif
     }
@@ -1236,6 +1391,11 @@ static void browser_task(void *arg)
                         break;
                     case BTN_VIDEO:
                         br.state = ST_VIDEO;
+                        draw_screen();
+                        break;
+                    case BTN_FILMS:
+                        br.query[0] = '\0';
+                        br.state = ST_FILMS;
                         draw_screen();
                         break;
 #endif
@@ -1509,6 +1669,81 @@ static void browser_task(void *arg)
                 media_stop();
                 br.state = videop_back;
                 draw_screen();
+            }
+            break;
+
+        case ST_FILMS:
+            if (tap) {
+                int id = urlrow_go_hit(tap_x, tap_y) ? BTN_GO
+                                                     : keyboard_hit(tap_x, tap_y);
+                if (id >= BTN_CHAR) {
+                    query_append_cp((uint32_t)id);
+                    draw_screen();
+                } else {
+                    switch (id) {
+                    case BTN_GO:
+                        do_films_search();   /* empty query = popular */
+                        break;
+                    case BTN_ENGINE:         /* НАЗАД on this screen */
+                        br.state = ST_HOME;
+                        draw_screen();
+                        break;
+                    case BTN_KBD:
+                        br.kb_ru = !br.kb_ru;
+                        draw_screen();
+                        break;
+                    case BTN_DEL: {
+                        size_t len = strlen(br.query);
+                        while (len > 0 &&
+                               (((unsigned char)br.query[len - 1]) & 0xC0) == 0x80) {
+                            len--;
+                        }
+                        if (len > 0) {
+                            br.query[len - 1] = '\0';
+                        }
+                        draw_screen();
+                        break;
+                    }
+                    case BTN_SPC:
+                        query_append_cp(' ');
+                        draw_screen();
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+
+        case ST_FILMSR:
+            if (tap) {
+                int nav_id = 0;
+                if (nav_hit(tap_x, tap_y, &nav_id)) {
+                    if (nav_id == BTN_HOME) {
+                        br.state = ST_HOME;
+                        draw_screen();
+                    } else if (nav_id == BTN_BACK) {
+                        br.state = ST_FILMS;
+                        draw_screen();
+                    } else if (nav_id == BTN_UP && films_scroll > 0) {
+                        films_scroll--;
+                        draw_screen();
+                    } else if (nav_id == BTN_DOWN &&
+                               films_scroll + (CONTENT_Y1_FULL - CONTENT_Y0) / ROW_H <
+                               films_n) {
+                        films_scroll++;
+                        draw_screen();
+                    }
+                } else if (tap_y >= CONTENT_Y0 && tap_y < CONTENT_Y1_FULL) {
+                    int row = (tap_y - CONTENT_Y0) / ROW_H;
+                    int idx = films_scroll + row;
+                    if (films_n == 0 || idx >= films_n) {
+                        br.state = ST_FILMS;    /* error frame: tap returns */
+                        draw_screen();
+                    } else {
+                        open_film(idx);
+                    }
+                }
             }
             break;
 #endif
