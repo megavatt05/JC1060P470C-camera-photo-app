@@ -29,6 +29,7 @@
 #endif
 #include "esp_gmf_video_color_convert.h"
 #include "esp_player.h"
+#include "esp_player_advance.h"
 #include "media/media_audio.h"
 #include "media/media_player.h"
 
@@ -311,6 +312,21 @@ static esp_err_t player_start(const char *url, bool video)
         goto fail;
     }
     esp_player_set_event_cb(s_mp.player, player_event_cb, NULL);
+
+    /* esp_player pins video_decoder to core 0 by default, so the CPU-bound
+     * SW H264 decode (tinyh264) starves IDLE0 -> task watchdog dumps and
+     * contention with everything living on core 0. Swap: video decode ->
+     * core 1, video render (SW color cvt + PPA + LCD flush) -> core 0.
+     * Audio tasks keep the built-in defaults (decoder=1, render=0).
+     * Stack/prio mirror player_defaults_cfg.h. */
+    esp_player_task_config_t tcfg = {
+        .extractor     = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .audio_decoder = { .stack = 5120, .prio = 5, .core = 1, .stack_in_ext = 0 },
+        .audio_render  = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .video_decoder = { .stack = 5120, .prio = 5, .core = 1, .stack_in_ext = 0 },
+        .video_render  = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+    };
+    esp_player_set_task_config(s_mp.player, &tcfg);
 
     esp_player_data_src_t src = ESP_PLAYER_DATA_SRC(s_mp.url,
                                        video ? ESP_PLAYER_MASK_AV : ESP_PLAYER_MASK_AUDIO);

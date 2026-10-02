@@ -174,14 +174,35 @@ E H264_DEC.SW: Serious error in decoding, failed to activate param sets
 - большинство публичных тестовых mp4 (test-videos.co.uk, gtv-videos-bucket,
   W3C-сэмплы) закодированы в **High/Main** — для платы не годятся; именно поэтому
   первые пресеты видео не играли;
-- в `media/` лежат два перекодированных в Constrained Baseline клипа Big Buck
-  Bunny: 360p (lvl 3.0, ~1.2 МБ) и 480p (lvl 3.1, ~1.7 МБ), AAC-LC 44.1 кГц,
-  faststart; пресеты видео в `browser.c` ссылаются на них через
-  `raw.githubusercontent.com` (Range-запросы поддерживаются);
+- в `media/` лежат перекодированные в Constrained Baseline клипы Big Buck
+  Bunny: 180p (lvl 2.1, 20 fps, ~0.7 МБ) и 360p (lvl 3.0, 30 fps, ~1.2 МБ),
+  AAC-LC 44.1 кГц (тестовый синус 440 Гц), faststart; пресеты видео в
+  `browser.c` ссылаются на них через `raw.githubusercontent.com`
+  (Range-запросы поддерживаются);
 - перекодирование своих файлов:
   `ffmpeg -i src.mp4 -c:v libx264 -profile:v baseline -level 3.1 -pix_fmt yuv420p -c:a aac -movflags +faststart out.mp4`;
-- разумный потолок для плавного софтового декода на P4 — 480p@30; 720p и выше,
-  скорее всего, не поспевают по CPU.
+
+### Производительность софтового декода (измерено на плате, rev v1.3 @360 МГц)
+
+- **360p@30 — не успевает**: кадр декодируется ~150-200 мс, итого ~5 fps вместо
+  30; картинка идёт «слайдшоу», рендер постоянно рапортует
+  `VIDEO_RENDER: Write too slow reset rate control`, а декод, занимая core 0,
+  душит IDLE0 и роняет task watchdog (`Task watchdog got triggered ... IDLE0`).
+- Разводка задач по ядрам сделана в `media_player.c` через
+  `esp_player_set_task_config()`: **видеодекодер → core 1**, видеорендер
+  (цветоконверт + PPA + вывод на панель) → **core 0** (дефолт esp_player:
+  декодер на core 0 — см. `player_defaults_cfg.h`). Это убирает WDT-дампы и
+  даёт рендеру/аудио свободное ядро, но скорость декода не увеличивает.
+- Частоту выше 360 МГц поднять нельзя: на ESP32-P4 rev < 3.0 режим 400 МГц
+  закрыт errata (в sdkconfig `CONFIG_ESP_FORCE_400MHZ_ON_REV_LESS_V3`
+  сознательно выключен).
+- **Плавное воспроизведение — 180p@20** (`bbb_180p_cb.mp4`): декод ~20-25 мс
+  на кадр, успевает в реальном времени. Практический потолок качества —
+  «слайдшоу» 360p.
+- Сообщения `MP4_PARSER ... Spec Config`, `ESP_GMF_ASMP_DEC: Not enough memory
+  for out` и `Dec frame size 640x368 differs ... use decoder size`
+  (MB-округление высоты декодером, плеер маскирует лишние строки) — штатные,
+  безвредны.
 
 ## 9. Соглашения
 

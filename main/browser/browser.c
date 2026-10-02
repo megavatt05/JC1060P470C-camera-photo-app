@@ -482,13 +482,15 @@ static const struct { const char *name; const char *url; } radio_stations[] = {
 
 /* Video presets. The SW H264 decoder (esp_h264 / tinyh264) plays only
  * Constrained Baseline streams: Main/High profiles are rejected at SPS
- * validation ("H264_DEC: profile_idc is error"). The two clips in media/
- * are Big Buck Bunny re-encoded to Constrained Baseline (360p lvl3.0,
- * 480p lvl3.1, AAC-LC, faststart) and served via raw.githubusercontent.com
- * (supports Range requests). See docs/ETHERNET_BROWSER.md, section "Медиа". */
+ * validation ("H264_DEC: profile_idc is error"). The clips in media/ are
+ * Big Buck Bunny re-encoded to Constrained Baseline and served via
+ * raw.githubusercontent.com (supports Range requests).
+ * Decode speed reality (SW decode, P4 rev<3 @360MHz): 360p@30 lands at
+ * ~5 fps (slideshow); 180p@20 is roughly realtime. Keep presets small.
+ * See docs/ETHERNET_BROWSER.md, section "Медиа". */
 static const struct { const char *name; const char *url; } video_presets[] = {
-    { "BBB 360p Baseline", "https://raw.githubusercontent.com/megavatt05/JC1060P470C-camera-photo-app/feature/ethernet-browser/media/bbb_360p_cb.mp4" },
-    { "BBB 480p Baseline", "https://raw.githubusercontent.com/megavatt05/JC1060P470C-camera-photo-app/feature/ethernet-browser/media/bbb_480p_cb.mp4" },
+    { "BBB 180p (плавно)", "https://raw.githubusercontent.com/megavatt05/JC1060P470C-camera-photo-app/feature/ethernet-browser/media/bbb_180p_cb.mp4" },
+    { "BBB 360p (четко)",  "https://raw.githubusercontent.com/megavatt05/JC1060P470C-camera-photo-app/feature/ethernet-browser/media/bbb_360p_cb.mp4" },
 };
 #define VIDEO_PRESETS_N (sizeof(video_presets) / sizeof(video_presets[0]))
 
