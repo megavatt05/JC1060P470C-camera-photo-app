@@ -274,7 +274,7 @@ static const jd9365_lcd_init_cmd_t lcd_cmd[] = {
     {0x11, (uint8_t[]){0x00}, 1, 120},
     {0x35, (uint8_t[]){0x00}, 1, 0},
 };
-#elif CONFIG_BOARD_TYPE_JC8012P4A1
+#elif CONFIG_BOARD_TYPE_JC4880P443
 static const st7701_lcd_init_cmd_t lcd_cmd[] = {
     {0xFF, (uint8_t []){0x77,0x01,0x00,0x00,0x13},5,0},
     {0xEF, (uint8_t []){0x08}, 1, 0},
