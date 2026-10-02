@@ -20,12 +20,12 @@ jobs:
 
       - name: Set Target Chip to ESP32-P4
         run: |
-          . /opt/esp-idf/export.sh
+          . $IDF_PATH/export.sh
           idf.py set-target esp32p4
 
       - name: Build Project
         run: |
-          . /opt/esp-idf/export.sh
+          . $IDF_PATH/export.sh
           idf.py build
 
       - name: Upload Artifacts
