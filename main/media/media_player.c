@@ -30,8 +30,11 @@
 #include "esp_gmf_video_color_convert.h"
 #include "esp_player.h"
 #include "esp_player_advance.h"
+#include "esp_task_wdt.h"
+#include "freertos/idf_additions.h"
 #include "media/media_audio.h"
 #include "media/media_player.h"
+#include "media/pstats.h"
 
 static const char *TAG = "media_player";
 
@@ -70,6 +73,7 @@ static struct {
 static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
 {
     (void)ctx;
+    pstats_player_event((int)msg->event_type);
     switch (msg->event_type) {
     case ESP_PLAYER_EVENT_PLAYED:
         s_mp.state = MEDIA_STATE_PLAYING;
@@ -193,8 +197,92 @@ static esp_err_t create_audio_render(void)
     return ESP_OK;
 }
 
+/* --- video render backend wrapper: stats OSD into every frame ---------
+ * While a video plays the render owns the DPI frame buffers, so the only
+ * way to keep anything on screen is to draw into the very buffer the
+ * backend is about to display. We wrap the stock LCD backend: every
+ * write_fb first records the frame (render fps counter + stream fps) and
+ * paints the pstats OSD block, then delegates. pstats_osd_draw() is a
+ * direct blit - ~0.2 ms per frame on the render core. */
+static const esp_video_render_backend_ops_t *s_lcd_ops;
+static esp_video_render_backend_handle_t s_lcd_backend;
+static int s_osd_handle;    /* opaque address used as our backend handle */
+
+static esp_video_render_err_t osd_init(void *cfg, int cfg_size,
+                                       esp_video_render_backend_handle_t *backend)
+{
+    esp_video_render_err_t r = s_lcd_ops->init(cfg, cfg_size, &s_lcd_backend);
+    if (r == ESP_VIDEO_RENDER_ERR_OK && backend != NULL) {
+        *backend = (esp_video_render_backend_handle_t)&s_osd_handle;
+    }
+    return r;
+}
+
+static bool osd_with_gram(esp_video_render_backend_handle_t backend)
+{
+    (void)backend;
+    return s_lcd_ops->with_gram(s_lcd_backend);
+}
+
+static esp_video_render_err_t osd_get_display_info(esp_video_render_backend_handle_t backend,
+                                                   esp_video_render_disp_info_t *info)
+{
+    (void)backend;
+    return s_lcd_ops->get_display_info(s_lcd_backend, info);
+}
+
+static esp_video_render_err_t osd_get_fb(esp_video_render_backend_handle_t backend,
+                                         esp_video_render_fb_t *fb)
+{
+    (void)backend;
+    return s_lcd_ops->get_fb(s_lcd_backend, fb);
+}
+
+static esp_video_render_err_t osd_lock_fb(esp_video_render_backend_handle_t backend,
+                                          esp_video_render_fb_t *fb, bool lock)
+{
+    (void)backend;
+    return s_lcd_ops->lock_fb(s_lcd_backend, fb, lock);
+}
+
+static esp_video_render_err_t osd_write_fb(esp_video_render_backend_handle_t backend,
+                                           esp_video_render_fb_t *fb,
+                                           const esp_video_render_rect_t *dirty_rect,
+                                           const esp_video_render_pos_t *pos)
+{
+    (void)backend;
+    if (fb != NULL && fb->data != NULL) {
+        pstats_note_video_frame(fb->info.fps);
+        if (fb->info.format == ESP_VIDEO_RENDER_FORMAT_RGB565 &&
+            fb->info.width == EXAMPLE_LCD_H_RES &&
+            fb->info.height == EXAMPLE_LCD_V_RES) {
+            pstats_osd_draw((uint16_t *)fb->data, fb->info.width, fb->info.height);
+        }
+    }
+    return s_lcd_ops->write_fb(s_lcd_backend, fb, dirty_rect, pos);
+}
+
+static esp_video_render_err_t osd_deinit(esp_video_render_backend_handle_t backend)
+{
+    (void)backend;
+    esp_video_render_backend_handle_t real = s_lcd_backend;
+    s_lcd_backend = NULL;
+    return s_lcd_ops->deinit(real);
+}
+
+static const esp_video_render_backend_ops_t s_osd_ops = {
+    .init              = osd_init,
+    .with_gram         = osd_with_gram,
+    .get_display_info  = osd_get_display_info,
+    .get_fb            = osd_get_fb,
+    .lock_fb           = osd_lock_fb,
+    .write_fb          = osd_write_fb,
+    .deinit            = osd_deinit,
+};
+
 static void destroy_video_render(void)
 {
+    pstats_osd_set(false);
     esp_log_level_set("VIDEO_RENDER", (esp_log_level_t)CONFIG_LOG_DEFAULT_LEVEL);
     if (s_mp.video_render != NULL) {
         esp_video_render_destroy(s_mp.video_render);
@@ -265,8 +353,14 @@ static esp_err_t create_video_render(void)
         destroy_video_render();
         return ESP_FAIL;
     }
+    s_lcd_ops = esp_video_render_get_lcd_backend();
+    if (s_lcd_ops == NULL) {
+        ESP_LOGE(TAG, "no lcd backend ops");
+        destroy_video_render();
+        return ESP_FAIL;
+    }
     esp_video_render_backend_cfg_t backend_cfg = {
-        .ops = esp_video_render_get_lcd_backend(),
+        .ops = &s_osd_ops,          /* wraps the lcd ops: stats OSD */
         .cfg = &lcd_cfg,
         .cfg_size = sizeof(lcd_cfg),
     };
@@ -341,13 +435,28 @@ static esp_err_t player_start(const char *url, bool video)
      * late frame logs "Write too slow" from the video render. 512 KB of
      * PSRAM holds seconds of stream data, the gate actually reaches its
      * resume threshold and network jitter gets smoothed out. Allowed in
-     * IDLE/STOPPED/FINISHED only - right after init is exactly that. */
+     * IDLE/STOPPED/FINISHED only - right after init is exactly that.
+     *
+     * Network tuning (eab762a follow-up): the built-in gate thresholds are
+     * 400/200/300 ms - tuned for fast links. On real archive.org streams
+     * the demux pool barely holds one gate cycle ("saturated at 278 ms"),
+     * so the gate disables itself and playback free-runs starved. Give it
+     * real headroom: 2 MB demux pool + 256 KB HTTP read-ahead + 1.5 s
+     * prebuffer (PSRAM is 32 MB; 1.5 s of media is ~400 KB at 2 Mbps) and
+     * short network bursts stop stalling the picture. */
     esp_player_buffer_config_t bcfg = {
-        .extractor_pool_size = 512 * 1024,
+        .extractor_pool_size = 2 * 1024 * 1024,
+        .http_read_buf_size  = 256 * 1024,
+        .prebuffer_resume_ms = 1500,
+        .rebuffer_enter_ms   = 400,
+        .rebuffer_resume_ms  = 1200,
+        .rebuffer_grace_ms   = 250,
     };
     if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {
         ESP_LOGW(TAG, "buffer cfg override failed, keeping built-in defaults");
     }
+    pstats_stream_reset();
+    pstats_osd_set(video);
 
     /* esp_player pins video_decoder to core 0 by default, so the CPU-bound
      * SW H264 decode (tinyh264) starves IDLE0 -> task watchdog dumps and
@@ -382,6 +491,27 @@ fail:
     return ESP_FAIL;
 }
 
+bool media_query_play(uint64_t *pos_ms, uint64_t *dur_ms)
+{
+    if (s_mp.player == NULL) {
+        return false;
+    }
+    uint64_t pos = 0, dur = 0;
+    if (esp_player_get_play_time(s_mp.player, &pos) != ESP_PLAYER_ERR_OK) {
+        return false;
+    }
+    if (esp_player_get_duration(s_mp.player, &dur) != ESP_PLAYER_ERR_OK) {
+        dur = 0;
+    }
+    if (pos_ms != NULL) {
+        *pos_ms = pos;
+    }
+    if (dur_ms != NULL) {
+        *dur_ms = dur;
+    }
+    return true;
+}
+
 esp_err_t media_player_init(void)
 {
     if (s_mp.inited) {
@@ -399,6 +529,25 @@ esp_err_t media_player_init(void)
         ESP_LOGE(TAG, "board audio init failed: %s", esp_err_to_name(err));
         return err;
     }
+
+    /* Playback stats: NIC rx counter + 1 Hz sampler (pstats.c) */
+    pstats_init();
+
+    /* The SW H264 decoder legitimately saturates its core (core 1) for
+     * minutes at 360p-class streams; IDLE1 then never runs and the task
+     * watchdog dumps registers every ~5 s while playback keeps going.
+     * Unsubscribe CPU1's idle task: decode starvation is now VISIBLE in
+     * the on-screen stats (CPU1 %, FPS vs target) instead of log spam.
+     * Failure is fine (already unsubscribed / not watched). */
+#if INCLUDE_xTaskGetIdleTaskHandle
+    {
+        TaskHandle_t idle1 = xTaskGetIdleTaskHandleForCore(1);
+        if (idle1 != NULL) {
+            esp_err_t werr = esp_task_wdt_delete(idle1);
+            ESP_LOGI(TAG, "IDLE1 watchdog unsubscribe: %s", esp_err_to_name(werr));
+        }
+    }
+#endif
 
     s_mp.inited = true;
     return ESP_OK;

@@ -35,6 +35,7 @@
 #include "browser/browser.h"
 #if CONFIG_EB_MEDIA_ENABLE
 #include "media/media_player.h"
+#include "media/pstats.h"
 #include "media/sdcard.h"
 #include <dirent.h>
 #endif
@@ -1562,6 +1563,26 @@ static void draw_busy_frame(uint16_t *fb)
                 UI_COLOR_PANEL);
     }
 
+#if CONFIG_EB_MEDIA_ENABLE
+    /* live diagnostics under the progress line: link vs CPU at a glance
+     * ("сеть 212 кБ/с  CPU0 40% CPU1 96%") - see pstats.h for the reading */
+    pstats_snapshot_t sn;
+    if (pstats_get(&sn)) {
+        char diag[80];
+        if (sn.cpu0 != PSTATS_CPU_NA) {
+            snprintf(diag, sizeof(diag), "сеть %lu кБ/с   CPU0 %lu%%  CPU1 %lu%%",
+                     (unsigned long)sn.net_kbps,
+                     (unsigned long)sn.cpu0, (unsigned long)sn.cpu1);
+        } else {
+            snprintf(diag, sizeof(diag), "сеть %lu кБ/с",
+                     (unsigned long)sn.net_kbps);
+        }
+        ui_text(fb, LCD_W, LCD_H,
+                cx + (cw - ui_text_width(diag, 1)) / 2, cy + 214,
+                diag, 1, UI_COLOR_BORDER, UI_COLOR_PANEL);
+    }
+#endif
+
     const char *hint = (strcmp(s_busy.stage, "готовлю плеер") == 0)
                        ? "тап по экрану - отменить"
                        : "плата работает - ждём ответ сервера";
@@ -2252,6 +2273,10 @@ void browser_start(void)
 #if CONFIG_EB_MEDIA_ENABLE
     /* films.c stage/byte reports drive the live busy card */
     films_set_prog_cb(films_prog_cb, NULL);
+    /* playback/net diagnostics (busy card line + video OSD); the sampler
+     * self-attaches to the NIC once it is up, so start it right away -
+     * probe/PREPARING phases need it too, before media_player_init runs */
+    pstats_init();
 #endif
 
     esp_err_t eth_err = app_eth_start();

@@ -20,6 +20,7 @@
 #define MEDIA_PLAYER_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -57,6 +58,13 @@ void media_pause(void);
 void media_resume(void);
 
 media_state_t media_get_state(void);
+
+/**
+ * @brief Current playback position/duration (ms). Used by the stats sampler.
+ * @return false when no player is running or the sync clock is not ready
+ *         yet; *dur_ms is 0 when the source has no duration metadata.
+ */
+bool media_query_play(uint64_t *pos_ms, uint64_t *dur_ms);
 
 /** @brief Human-readable state for the UI ("СТОП", "ИГРАЕТ", ...). */
 const char *media_state_str(void);

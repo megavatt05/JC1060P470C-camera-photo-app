@@ -104,3 +104,21 @@ CONFIG_HEAP_POISONING_COMPREHENSIVE=y
 # Отключаем аппаратные операции — TLS сразу идёт через софтовый mbedTLS:
 # CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY is not set
 # CONFIG_MBEDTLS_HARDWARE_ECDSA_SIGN is not set
+
+# --- Сеть: увеличенное TCP-окно (E-22) ---
+# Дефолт 5760 байт (4*MSS) при RTT ~200 мс до archive.org ограничивает
+# загрузку ~25-30 кБ/с (окно/RTT) - отсюда вечные буферизации и 3-минутные
+# moov-пробы. Окно 65535 поднимает потолок до ~300-350 кБ/с при том же RTT.
+# Применяется ТОЛЬКО при пересоздании sdkconfig: idf.py set-target esp32p4
+# (или menuconfig: LWIP -> TCP -> Default receive window size).
+CONFIG_LWIP_TCP_WND_DEFAULT=65535
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535
+# Рекомендация из help той же опции: WND/MSS + 2
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=48
+
+# --- Точная загрузка CPU по ядрам для экранной статистики (E-22) ---
+# pstats берёт idle-время из run-time stats FreeRTOS; без этой опции строка
+# CPU на OSD покажет "n/a" (остальная статистика работает и так).
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64=y
