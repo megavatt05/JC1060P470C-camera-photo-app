@@ -43,6 +43,7 @@ static struct {
     const audio_codec_if_t *codec_if;
     esp_codec_dev_handle_t dev;
     bool open;
+    bool wr_err;                        /* logged a write failure recently */
     int volume;
 } s_au = { .volume = 70 };
 
@@ -226,6 +227,7 @@ esp_err_t media_audio_open(void)
         return ESP_FAIL;
     }
     esp_codec_dev_set_out_vol(s_au.dev, s_au.volume);
+    s_au.wr_err = false;
     s_au.open = true;
     return ESP_OK;
 }
@@ -241,10 +243,23 @@ void media_audio_close(void)
 int media_audio_write(const uint8_t *pcm, int len)
 {
     if (!s_au.open || s_au.dev == NULL) {
+        if (!s_au.wr_err) {
+            ESP_LOGE(TAG, "write: audio device is not open");
+            s_au.wr_err = true;
+        }
         return -1;
     }
     int ret = esp_codec_dev_write(s_au.dev, (void *)pcm, len);
-    return ret < 0 ? -1 : len;
+    if (ret < 0) {
+        /* log the first failure only - a dead stream would otherwise spam */
+        if (!s_au.wr_err) {
+            ESP_LOGE(TAG, "codec write failed: %d", ret);
+            s_au.wr_err = true;
+        }
+        return -1;
+    }
+    s_au.wr_err = false;
+    return len;
 }
 
 void media_audio_set_volume(int vol)

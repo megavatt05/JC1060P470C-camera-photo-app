@@ -473,7 +473,7 @@ static void draw_loading(uint16_t *fb, const char *what);
 static const struct { const char *name; const char *url; } radio_stations[] = {
     { "Европа Плюс",    "http://ep128server.streamr.ru:8030/ep128" },
     { "Радио Рекорд",   "http://air.radiorecord.ru:805/rr_320" },
-    { "Дорожное радио", "http://dorognoe.hostingradio.ru:8000/rodio" },
+    { "Дорожное радио", "http://dorognoe.hostingradio.ru:8000/dorognoe" },
     { "Радио Дача",     "http://dacha.hostingradio.ru:8025/radiodacha96.aacp" },
     { "SomaFM Groove",  "https://ice1.somafm.com/groovesalad-128-mp3" },
     { "Radio Paradise", "http://stream.radioparadise.com/mp3-128" },

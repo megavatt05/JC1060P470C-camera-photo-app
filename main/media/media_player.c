@@ -36,11 +36,15 @@ static const char *TAG = "media_player";
 
 #define MEDIA_URL_MAX 256
 
-/* esp_audio_render write callback -> codec device */
+/* esp_audio_render write callback -> codec device.
+ * Contract (esp_audio_render_write_cb_t): return 0 on success, non-zero on
+ * failure. Returning the byte count here made the render treat every
+ * successful write as an error ("OUT port release error, ret:-1" from
+ * ESP_GMF_RATE_CVT) and killed the stream on the first PCM chunk. */
 static int audio_writer_cb(uint8_t *pcm, uint32_t len, void *ctx)
 {
     (void)ctx;
-    return media_audio_write(pcm, (int)len);
+    return media_audio_write(pcm, (int)len) < 0 ? -1 : 0;
 }
 
 static struct {
