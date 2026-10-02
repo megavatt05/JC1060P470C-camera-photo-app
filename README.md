@@ -64,5 +64,15 @@ idf.py -p COMx flash monitor
 │   ├── browser/html_text.c           # парсеры SERP DDG/Google, html→text
 │   └── Kconfig.projbuild             # пины W5500/тача, движок поиска
 └── docs/
-    └── ETHERNET_BROWSER.md           # концепция, распиновка, фазы
+    ├── ETHERNET_BROWSER.md           # концепция, распиновка, фазы
+    └── flash/                        # ГОТОВАЯ ПРОШИВКА: веб-форма, bins, инструкция
 ```
+
+## Прошивка без сборки (готовые бинарники)
+
+Не нужно ставить ESP-IDF, чтобы залить прошивку: в
+[`docs/flash/`](docs/flash/README.md) лежит готовый комплект
+(коммит `a779300` — браузер + видео + ФИЛЬМЫ + фиксы):
+веб-форма [`web_flasher_cambrowser.html`](https://megavatt05.github.io/JC1060P470C-camera-photo-app/flash/web_flasher_cambrowser.html)
+(Chrome/Edge → COM10), единый образ и полная инструкция
+[`FLASH_GUIDE_RU.md`](docs/flash/FLASH_GUIDE_RU.md).
