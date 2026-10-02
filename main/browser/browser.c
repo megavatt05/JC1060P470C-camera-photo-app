@@ -289,10 +289,10 @@ static void draw_status_bar(uint16_t *fb)
 static void draw_nav_bar(uint16_t *fb)
 {
     static const ui_button_t nav[] = {
-        { 8,   LCD_H - 60, 180, 56, "МЕНЮ",  BTN_HOME },
-        { 196, LCD_H - 60, 180, 56, "НАЗАД", BTN_BACK },
-        { 830, LCD_H - 60, 88,  56, "^",     BTN_UP   },
-        { 926, LCD_H - 60, 88,  56, "|",     BTN_DOWN },
+        { 8,   LCD_H - 60, 180, 56, "МЕНЮ",  BTN_HOME, 0 },
+        { 196, LCD_H - 60, 180, 56, "НАЗАД", BTN_BACK, 0 },
+        { 830, LCD_H - 60, 88,  56, "^",     BTN_UP,   0 },
+        { 926, LCD_H - 60, 88,  56, "|",     BTN_DOWN, 0 },
     };
 
     ui_fill_rect(fb, LCD_W, LCD_H, 0, LCD_H - 64, LCD_W, LCD_H, UI_COLOR_BG);
@@ -323,10 +323,10 @@ static void draw_nav_bar(uint16_t *fb)
 static bool nav_hit(int x, int y, int *out_id)
 {
     static const ui_button_t nav[] = {
-        { 8,   LCD_H - 60, 180, 56, "МЕНЮ",  BTN_HOME },
-        { 196, LCD_H - 60, 180, 56, "НАЗАД", BTN_BACK },
-        { 830, LCD_H - 60, 88,  56, "^",     BTN_UP   },
-        { 926, LCD_H - 60, 88,  56, "|",     BTN_DOWN },
+        { 8,   LCD_H - 60, 180, 56, "МЕНЮ",  BTN_HOME, 0 },
+        { 196, LCD_H - 60, 180, 56, "НАЗАД", BTN_BACK, 0 },
+        { 830, LCD_H - 60, 88,  56, "^",     BTN_UP,   0 },
+        { 926, LCD_H - 60, 88,  56, "|",     BTN_DOWN, 0 },
     };
     for (size_t i = 0; i < sizeof(nav) / sizeof(nav[0]); i++) {
         if (ui_button_hit(&nav[i], x, y)) {
@@ -557,7 +557,8 @@ static struct {
     bool     dead;        /* animator has exited                         */
     char     title[48];   /* what was tapped / searched                  */
     char     stage[48];   /* current phase ("проверяю файл")             */
-    char     extra[40];   /* bytes / rate line ("1.2 из 2.9 МБ, 19 кБ/с")*/
+    char     extra[64];   /* bytes / rate line ("1.2 из 2.9 МБ, 19 кБ/с")
+                           * 64: worst-case snprintf fits without truncation */
     int64_t  t0;          /* busy window start, us                       */
     int64_t  stage_t0;    /* current stage start, us (for the rate)      */
     uint32_t acc_bytes;   /* bytes accumulated in the current stage      */
@@ -1510,7 +1511,10 @@ static void busy_fmt_kb(char *out, size_t n, uint32_t b)
     if (b >= 1024u * 1024u) {
         uint32_t tenth = (uint32_t)(((uint64_t)b * 10u + (1024u * 1024u / 2u)) /
                                     (1024u * 1024u));
-        snprintf(out, n, "%u.%u МБ", tenth / 10u, tenth % 10u);
+        /* uint32_t is 'unsigned long' on the riscv newlib toolchain: cast
+         * explicitly so %lu is right both there and on the gcc host build */
+        snprintf(out, n, "%lu.%lu МБ",
+                 (unsigned long)(tenth / 10u), (unsigned long)(tenth % 10u));
     } else {
         snprintf(out, n, "%u кБ", (unsigned)((b + 1023u) / 1024u));
     }
