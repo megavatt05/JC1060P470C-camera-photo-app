@@ -731,14 +731,14 @@ const char *films_err_str(films_play_err_t e)
 {
     switch (e) {
     case FILMS_PLAY_OK:       return "ok";
-    case FILMS_ERR_NET:       return "сеть недоступна/таймаут";
+    case FILMS_ERR_NET:       return "сервер не ответил";
     case FILMS_ERR_NO_RESULT: return "ничего не найдено";
-    case FILMS_ERR_NO_MP4:    return "у фильма нет mp4-версии";
-    case FILMS_ERR_NO_RANGE:  return "сервер не поддерживает докачку";
-    case FILMS_ERR_NOT_H264:  return "кодек не H.264 (HEVC/MPEG4)";
+    case FILMS_ERR_NO_MP4:    return "нет mp4-версии";
+    case FILMS_ERR_NO_RANGE:  return "сервер без докачки";
+    case FILMS_ERR_NOT_H264:  return "кодек не H.264";
     case FILMS_ERR_HIGH_PROFILE:
-        return "профиль H.264 Main/High не поддерживается (нужен Baseline)";
-    case FILMS_ERR_NO_VIDEO:  return "в файле нет видеодорожки";
+        return "нужен H.264 Baseline";
+    case FILMS_ERR_NO_VIDEO:  return "нет видеодорожки";
     default:                  return "ошибка";
     }
 }

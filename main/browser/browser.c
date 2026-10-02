@@ -27,6 +27,7 @@
 #include "app_lcd.h"
 #include "net/app_eth.h"
 #include "camos/ui.h"
+#include "camos/ui_icons.h"
 #include "camos/touch.h"
 #include "browser/web_client.h"
 #include "browser/html_text.h"
@@ -54,7 +55,7 @@ static const char *TAG = "browser";
 #define CONTENT_Y1      368     /* keyboard starts below   */
 #define CONTENT_Y1_FULL (LCD_H - 64) /* without keyboard   */
 
-#define ROW_H           36      /* results list row        */
+#define ROW_H           46      /* result/film card pitch   */
 #define LINE_H          20      /* page text line          */
 #define PAGE_COLS       ((LCD_W - 24) / (UI_FONT_W * UI_SCALE_TEXT))
 
@@ -214,82 +215,116 @@ static void page_free(void)
     br.page_scroll = 0;
 }
 
-/* --- Drawing helpers -------------------------------------------------------- */
+/* --- Drawing helpers (theme v2 "friendly dark") ---------------------------- */
 
-static void draw_status_bar(uint16_t *fb)
-{
-    char left[48];
-    char right[40];
-
-    ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, BAR_H, UI_COLOR_BAR);
-
-    if (app_eth_ready()) {
-        snprintf(left, sizeof(left), "ETH: %s", app_eth_ip_str());
-    } else {
-        snprintf(left, sizeof(left), "NET: %s", app_eth_status_str());
-    }
-    snprintf(right, sizeof(right), "[%s] touch:%s",
-             br.engine_google ? "GGL" : "DDG", touch_chip_name());
-#if CONFIG_EB_MEDIA_ENABLE
-    if (media_get_state() == MEDIA_STATE_PLAYING && !media_video_active()) {
-        strlcat(right, " R", sizeof(right));    /* radio plays in background */
-    }
-#endif
-
-    ui_text(fb, LCD_W, LCD_H, 8, (BAR_H - UI_FONT_H) / 2,
-            left, 1, UI_COLOR_OK, UI_COLOR_BAR);
-    ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(right, 1) - 8,
-            (BAR_H - UI_FONT_H) / 2, right, 1, UI_COLOR_URL, UI_COLOR_BAR);
-}
-
+/* Rounded search field + GO button; shared by HOME / URLIN / FILMS */
 static void draw_url_row(uint16_t *fb)
 {
-    static const ui_button_t go = {
-        .x = LCD_W - GO_W - 8, .y = URL_Y + 4, .w = GO_W, .h = URL_H - 8,
-        .label = "GO", .id = BTN_GO, .scale = KB_KEY_SCALE
-    };
-
     ui_fill_rect(fb, LCD_W, LCD_H, 0, URL_Y, LCD_W, URL_Y + URL_H, UI_COLOR_BG);
-    ui_frame(fb, LCD_W, LCD_H, 4, URL_Y + 2, LCD_W - GO_W - 12, URL_Y + URL_H - 2,
-             2, UI_COLOR_BORDER);
+
+    /* field */
+    ui_rrect(fb, LCD_W, LCD_H, 8, URL_Y + 4, LCD_W - GO_W - 16, URL_Y + URL_H - 2,
+             UI_R_PILL, UI_COLOR_PANEL);
+    ui_rrect_frame(fb, LCD_W, LCD_H, 8, URL_Y + 4, LCD_W - GO_W - 16, URL_Y + URL_H - 2,
+                   UI_R_PILL, br.query[0] == '\0' ? UI_COLOR_BORDER : UI_COLOR_ACCENT);
+
+    ui_icon(&ui_icon_search, fb, LCD_W, LCD_H, 20, URL_Y + (URL_H - 16) / 2, 1,
+            UI_COLOR_DIM);
 
     char fitted[96];
-    ui_text_fit(fitted, sizeof(fitted), br.query, LCD_W - GO_W - 40, UI_SCALE_URL);
-    ui_text(fb, LCD_W, LCD_H, 10, URL_Y + (URL_H - UI_FONT_H * UI_SCALE_URL) / 2,
-            fitted, UI_SCALE_URL, UI_COLOR_FG, UI_COLOR_BG);
+    ui_text_fit(fitted, sizeof(fitted), br.query, LCD_W - GO_W - 60, UI_SCALE_URL);
+    ui_text(fb, LCD_W, LCD_H, 44, URL_Y + (URL_H - UI_FONT_H * UI_SCALE_URL) / 2,
+            fitted, UI_SCALE_URL, UI_COLOR_FG, UI_COLOR_PANEL);
 
     /* caret */
-    int cx = 10 + ui_text_width(fitted, UI_SCALE_URL) + 2;
+    int cx = 44 + ui_text_width(fitted, UI_SCALE_URL) + 2;
     if ((esp_timer_get_time() / 500000) & 1) {
         ui_fill_rect(fb, LCD_W, LCD_H, cx, URL_Y + 16, cx + UI_SCALE_URL,
                      URL_Y + URL_H - 16, UI_COLOR_ACCENT);
     }
 
-    ui_button(fb, LCD_W, LCD_H, &go, false);
+    /* GO: accent pill, dark text */
+    ui_rrect(fb, LCD_W, LCD_H, LCD_W - GO_W - 8, URL_Y + 6, LCD_W - 8, URL_Y + URL_H - 4,
+             UI_R_KEY, UI_COLOR_ACCENT);
+    char gol[] = "GO";
+    int gw = ui_text_width(gol, 3);
+    ui_text(fb, LCD_W, LCD_H, LCD_W - GO_W - 8 + (GO_W - gw) / 2,
+            URL_Y + (URL_H - UI_FONT_H * 3) / 2 + 1, gol, 3, UI_COLOR_BG, UI_COLOR_ACCENT);
 }
 
+static void draw_status_bar(uint16_t *fb)
+{
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, BAR_H, UI_COLOR_BAR);
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H - 1, LCD_W, BAR_H, UI_COLOR_BORDER);
+
+    /* left: link dot + address */
+    ui_circle(fb, LCD_W, LCD_H, 12, BAR_H / 2, 3, app_eth_ready() ? UI_COLOR_OK : UI_COLOR_ERR);
+    char left[40];
+    if (app_eth_ready()) {
+        snprintf(left, sizeof(left), "%s", app_eth_ip_str());
+    } else {
+        snprintf(left, sizeof(left), "%s", app_eth_status_str());
+    }
+    ui_text(fb, LCD_W, LCD_H, 22, (BAR_H - UI_FONT_H) / 2,
+            left, 1, UI_COLOR_FG, UI_COLOR_BAR);
+
+    /* right: engine pill + radio-on note */
+    int x = LCD_W - 8;
+#if CONFIG_EB_MEDIA_ENABLE
+    if (media_get_state() == MEDIA_STATE_PLAYING && !media_video_active()) {
+        ui_icon(&ui_icon_music, fb, LCD_W, LCD_H, x - 14, (BAR_H - 16) / 2, 1, UI_COLOR_OK);
+        x -= 20;
+    }
+#endif
+    const char *eng = br.engine_google ? "GGL" : "DDG";
+    int pw = ui_text_width(eng, 1) + 16;
+    ui_rrect(fb, LCD_W, LCD_H, x - pw, 6, x, BAR_H - 6, (BAR_H - 12) / 2, UI_COLOR_KEY);
+    ui_text(fb, LCD_W, LCD_H, x - pw + 8, (BAR_H - UI_FONT_H) / 2,
+            eng, 1, UI_COLOR_ACCENT, UI_COLOR_KEY);
+}
+
+/* nav bar: rounded buttons, icons on HOME/BACK, chevrons for UP/DOWN */
 static void draw_nav_bar(uint16_t *fb)
 {
     static const ui_button_t nav[] = {
-        { 8,   LCD_H - 60, 180, 56, "HOME",  BTN_HOME },
-        { 196, LCD_H - 60, 180, 56, "BACK",  BTN_BACK },
-        { 830, LCD_H - 60, 88,  56, "UP",    BTN_UP   },
-        { 926, LCD_H - 60, 88,  56, "DOWN",  BTN_DOWN },
+        { 8,   LCD_H - 60, 180, 56, "МЕНЮ",  BTN_HOME },
+        { 196, LCD_H - 60, 180, 56, "НАЗАД", BTN_BACK },
+        { 830, LCD_H - 60, 88,  56, "^",     BTN_UP   },
+        { 926, LCD_H - 60, 88,  56, "|",     BTN_DOWN },
     };
 
     ui_fill_rect(fb, LCD_W, LCD_H, 0, LCD_H - 64, LCD_W, LCD_H, UI_COLOR_BG);
-    for (size_t i = 0; i < sizeof(nav) / sizeof(nav[0]); i++) {
-        ui_button(fb, LCD_W, LCD_H, &nav[i], false);
+    for (size_t i = 0; i < 2; i++) {
+        const ui_button_t *b = &nav[i];
+        ui_rrect(fb, LCD_W, LCD_H, b->x, b->y, b->x + b->w, b->y + b->h,
+                 UI_R_KEY, UI_COLOR_KEY);
+        ui_rrect_frame(fb, LCD_W, LCD_H, b->x, b->y, b->x + b->w, b->y + b->h,
+                       UI_R_KEY, UI_COLOR_BORDER);
+        const ui_icon_t *ic = (b->id == BTN_HOME) ? &ui_icon_home : &ui_icon_back;
+        ui_icon(ic, fb, LCD_W, LCD_H, b->x + 18, b->y + (b->h - 16) / 2, 1, UI_COLOR_ACCENT);
+        int tw = ui_text_width(b->label, 2);
+        ui_text(fb, LCD_W, LCD_H, b->x + (b->w - tw - 24) / 2 + 24,
+                b->y + (b->h - UI_FONT_H * 2) / 2, b->label, 2, UI_COLOR_FG, UI_COLOR_KEY);
+    }
+    for (size_t i = 2; i < 4; i++) {
+        const ui_button_t *b = &nav[i];
+        ui_rrect(fb, LCD_W, LCD_H, b->x, b->y, b->x + b->w, b->y + b->h,
+                 UI_R_KEY, UI_COLOR_KEY);
+        ui_rrect_frame(fb, LCD_W, LCD_H, b->x, b->y, b->x + b->w, b->y + b->h,
+                       UI_R_KEY, UI_COLOR_BORDER);
+        ui_icon(b->id == BTN_UP ? &ui_icon_up : &ui_icon_down,
+                fb, LCD_W, LCD_H, b->x + (b->w - 16) / 2, b->y + (b->h - 16) / 2, 1,
+                UI_COLOR_FG);
     }
 }
 
 static bool nav_hit(int x, int y, int *out_id)
 {
     static const ui_button_t nav[] = {
-        { 8,   LCD_H - 60, 180, 56, "HOME",  BTN_HOME },
-        { 196, LCD_H - 60, 180, 56, "BACK",  BTN_BACK },
-        { 830, LCD_H - 60, 88,  56, "UP",    BTN_UP   },
-        { 926, LCD_H - 60, 88,  56, "DOWN",  BTN_DOWN },
+        { 8,   LCD_H - 60, 180, 56, "МЕНЮ",  BTN_HOME },
+        { 196, LCD_H - 60, 180, 56, "НАЗАД", BTN_BACK },
+        { 830, LCD_H - 60, 88,  56, "^",     BTN_UP   },
+        { 926, LCD_H - 60, 88,  56, "|",     BTN_DOWN },
     };
     for (size_t i = 0; i < sizeof(nav) / sizeof(nav[0]); i++) {
         if (ui_button_hit(&nav[i], x, y)) {
@@ -305,6 +340,22 @@ static bool urlrow_go_hit(int x, int y)
 {
     return (y >= URL_Y && y < URL_Y + URL_H &&
             x >= LCD_W - GO_W - 8 && x < LCD_W - 8);
+}
+
+/* Slim scrollbar on the right edge of a list zone */
+static void draw_scrollbar(uint16_t *fb, int y0, int y1, int total,
+                           int first, int visible)
+{
+    if (total <= visible) {
+        return;
+    }
+    ui_fill_rect(fb, LCD_W, LCD_H, LCD_W - 5, y0, LCD_W - 3, y1, UI_COLOR_KEY);
+    int th = (y1 - y0) * visible / total;
+    if (th < 24) {
+        th = 24;
+    }
+    int ty = y0 + (y1 - y0 - th) * first / (total - visible);
+    ui_rrect(fb, LCD_W, LCD_H, LCD_W - 5, ty, LCD_W - 3, ty + th, 1, UI_COLOR_ACCENT);
 }
 
 /* --- Keyboard ---------------------------------------------------------------- */
@@ -357,7 +408,7 @@ static const struct { int w; const char *label; int id; } kb_bottom[] = {
     { 200, "SPC", BTN_SPC },
     { 150, "DEL", BTN_DEL },
     { 150, NULL,  BTN_KBD },        /* EN | RU                    */
-    { 170, NULL,  BTN_ENGINE },     /* GGL | DDG                  */
+    { 170, NULL,  BTN_ENGINE },     /* GGL | DDG | НАЗАД          */
     { 170, "GO",  BTN_GO },
 };
 #define KB_BOTTOM_N (sizeof(kb_bottom) / sizeof(kb_bottom[0]))
@@ -368,7 +419,7 @@ static const char *kb_bottom_label(size_t i)
         return kb_bottom[i].label;
     }
     if (kb_bottom[i].id == BTN_KBD) {
-        return br.kb_ru ? "RU" : "EN";
+        return br.kb_ru ? "РУ" : "EN";
     }
 #if CONFIG_EB_MEDIA_ENABLE
     /* on the media URL / films search screens the engine slot doubles as
@@ -391,9 +442,34 @@ static int kb_bottom_x0(void)
     return (LCD_W - total) / 2;
 }
 
+static void kb_draw_key(uint16_t *fb, int x, int y, int w, const char *lab, int id)
+{
+    int sc = KB_KEY_SCALE;
+    if (id == BTN_GO) {
+        ui_rrect(fb, LCD_W, LCD_H, x, y, x + w, y + KEY_H, UI_R_KEY, UI_COLOR_ACCENT);
+        int tw = ui_text_width(lab, sc);
+        ui_text(fb, LCD_W, LCD_H, x + (w - tw) / 2, y + (KEY_H - UI_FONT_H * sc) / 2,
+                lab, sc, UI_COLOR_BG, UI_COLOR_ACCENT);
+        return;
+    }
+    uint16_t txt = UI_COLOR_FG;
+    uint16_t border = UI_COLOR_BORDER;
+    if (id == BTN_DEL) {
+        txt = UI_COLOR_ERR;
+    } else if (id == BTN_KBD || id == BTN_ENGINE) {
+        txt = UI_COLOR_ACCENT;
+        border = UI_COLOR_ACCENT2;
+    }
+    ui_rrect(fb, LCD_W, LCD_H, x, y, x + w, y + KEY_H, UI_R_KEY, UI_COLOR_KEY);
+    ui_rrect_frame(fb, LCD_W, LCD_H, x, y, x + w, y + KEY_H, UI_R_KEY, border);
+    int tw = ui_text_width(lab, sc);
+    ui_text(fb, LCD_W, LCD_H, x + (w - tw) / 2, y + (KEY_H - UI_FONT_H * sc) / 2,
+            lab, sc, txt, UI_COLOR_KEY);
+}
+
 static void draw_keyboard(uint16_t *fb)
 {
-    ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y1, LCD_W, LCD_H, 0x0000);
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y1, LCD_W, LCD_H, UI_COLOR_BG);
 
     const uint32_t (*rows)[KB_ROW_MAX] = kb_rows();
     int y = CONTENT_Y1 + KEY_VGAP;
@@ -408,20 +484,20 @@ static void draw_keyboard(uint16_t *fb)
         for (int k = 0; k < n; k++, x += KEY_W + KEY_GAP) {
             char lab[3];
             kb_key_label(rows[r][k], lab);
-            ui_button_t key = { .x = x, .y = y, .w = KEY_W, .h = KEY_H,
-                                .label = lab, .id = (int)rows[r][k],
-                                .scale = KB_KEY_SCALE };
-            ui_button(fb, LCD_W, LCD_H, &key, false);
+            ui_rrect(fb, LCD_W, LCD_H, x, y, x + KEY_W, y + KEY_H, UI_R_KEY, UI_COLOR_KEY);
+            ui_rrect_frame(fb, LCD_W, LCD_H, x, y, x + KEY_W, y + KEY_H, UI_R_KEY,
+                           UI_COLOR_BORDER);
+            int tw = ui_text_width(lab, KB_KEY_SCALE);
+            ui_text(fb, LCD_W, LCD_H, x + (KEY_W - tw) / 2,
+                    y + (KEY_H - UI_FONT_H * KB_KEY_SCALE) / 2,
+                    lab, KB_KEY_SCALE, UI_COLOR_FG, UI_COLOR_KEY);
         }
         y += KEY_H + KEY_VGAP;
     }
 
     int x = kb_bottom_x0();
     for (size_t i = 0; i < KB_BOTTOM_N; i++) {
-        ui_button_t key = { .x = x, .y = y, .w = kb_bottom[i].w, .h = KEY_H,
-                            .label = kb_bottom_label(i), .id = kb_bottom[i].id,
-                            .scale = KB_KEY_SCALE };
-        ui_button(fb, LCD_W, LCD_H, &key, false);
+        kb_draw_key(fb, x, y, kb_bottom[i].w, kb_bottom_label(i), kb_bottom[i].id);
         x += kb_bottom[i].w + KEY_GAP;
     }
 }
@@ -500,11 +576,11 @@ static const struct { const char *name; const char *url; } video_presets[] = {
 };
 #define VIDEO_PRESETS_N (sizeof(video_presets) / sizeof(video_presets[0]))
 
-/* HOME: three app launcher buttons in the content zone */
+/* HOME: three app launcher cards in the content zone */
 static const ui_button_t home_apps[] = {
-    { 20,  150, 320, 110, "РАДИО",  BTN_RADIO, 3 },
-    { 352, 150, 320, 110, "ВИДЕО",  BTN_VIDEO, 3 },
-    { 684, 150, 320, 110, "ФИЛЬМЫ", BTN_FILMS, 3 },
+    { 20,  108, 320, 142, "РАДИО",  BTN_RADIO, 3 },
+    { 352, 108, 320, 142, "ВИДЕО",  BTN_VIDEO, 3 },
+    { 684, 108, 320, 142, "ФИЛЬМЫ", BTN_FILMS, 3 },
 };
 #define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
 
@@ -518,6 +594,18 @@ static bool home_apps_hit(int x, int y, int *out_id)
     }
     return false;
 }
+
+static const ui_icon_t *home_app_icon(size_t i)
+{
+    static const ui_icon_t *const icons[] = {
+        &ui_icon_music, &ui_icon_clap, &ui_icon_film,
+    };
+    return icons[i];
+}
+
+static const uint16_t home_app_color[3] = {
+    UI_COLOR_OK, UI_COLOR_WARN, UI_COLOR_ACCENT,
+};
 
 /* Radio: station tile geometry, shared by draw and hit-test */
 
@@ -555,20 +643,29 @@ static void draw_radio(uint16_t *fb)
 
     ui_text(fb, LCD_W, LCD_H, 12, 44, "РАДИО", UI_SCALE_TITLE, UI_COLOR_ACCENT, UI_COLOR_BG);
     char st[48];
-    snprintf(st, sizeof(st), "%s  ЗВУК:%d", media_state_str(), media_get_volume());
+    snprintf(st, sizeof(st), "%s", media_state_str());
     ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(st, UI_SCALE_TEXT) - 12,
-            52, st, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
+            52, st, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
+
+    /* volume bar under the state text */
+    ui_progress(fb, LCD_W, LCD_H, LCD_W - 172, 74, 160, 12,
+                media_get_volume() / 100.0f, UI_COLOR_OK);
 
     for (size_t i = 0; i < RADIO_STATIONS_N; i++) {
         ui_button_t b;
         radio_st_btn((int)i, &b);
-        ui_button(fb, LCD_W, LCD_H, &b, false);
-        /* highlight the station whose stream is loaded right now */
-        if (media_get_state() != MEDIA_STATE_IDLE &&
-            strcmp(media_get_url(), radio_stations[i].url) == 0) {
-            ui_frame(fb, LCD_W, LCD_H, b.x - 3, b.y - 3, b.x + b.w + 3, b.y + b.h + 3,
-                     2, UI_COLOR_OK);
-        }
+        bool active = (media_get_state() != MEDIA_STATE_IDLE &&
+                       strcmp(media_get_url(), radio_stations[i].url) == 0);
+        ui_rrect(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
+                 active ? UI_COLOR_BG_PRESS : UI_COLOR_PANEL);
+        ui_rrect_frame(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
+                       active ? UI_COLOR_OK : UI_COLOR_BORDER);
+        ui_icon(&ui_icon_music, fb, LCD_W, LCD_H, b.x + 20, b.y + (b.h - 16) / 2, 1,
+                active ? UI_COLOR_OK : UI_COLOR_DIM);
+        int tw = ui_text_width(b.label, 3);
+        ui_text(fb, LCD_W, LCD_H, b.x + (b.w - tw) / 2 + 12,
+                b.y + (b.h - UI_FONT_H * 3) / 2, b.label, 3,
+                active ? UI_COLOR_FG : UI_COLOR_DIM, UI_COLOR_PANEL);
     }
 
     static const struct { int w; int id; } ctrls[] = {
@@ -588,7 +685,7 @@ static void draw_radio(uint16_t *fb)
 
     ui_button_t sd = { 200, 420, 280, 60, "SD-КАРТА", BTN_SD, 3 };
     ui_button(fb, LCD_W, LCD_H, &sd, false);
-    ui_button_t back = { 544, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
+    ui_button_t back = { 544, 420, 280, 60, "В МЕНЮ", BTN_MBACK, 3 };
     ui_button(fb, LCD_W, LCD_H, &back, false);
 
     if (media_get_state() != MEDIA_STATE_IDLE && media_get_url()[0] != '\0') {
@@ -622,7 +719,7 @@ static int radio_hit(int x, int y)
     if (ui_button_hit(&sd, x, y)) {
         return BTN_SD;
     }
-    ui_button_t back = { 544, 420, 280, 60, "НАЗАД", BTN_MBACK, 3 };
+    ui_button_t back = { 544, 420, 280, 60, "В МЕНЮ", BTN_MBACK, 3 };
     if (ui_button_hit(&back, x, y)) {
         return BTN_MBACK;
     }
@@ -645,12 +742,20 @@ static void draw_video(uint16_t *fb)
     draw_status_bar(fb);
     ui_fill_rect(fb, LCD_W, LCD_H, 0, BAR_H, LCD_W, LCD_H, UI_COLOR_BG);
 
-    ui_text(fb, LCD_W, LCD_H, 12, 44, "ВИДЕО", UI_SCALE_TITLE, UI_COLOR_ACCENT, UI_COLOR_BG);
+    ui_text(fb, LCD_W, LCD_H, 12, 44, "ВИДЕО", UI_SCALE_TITLE, UI_COLOR_WARN, UI_COLOR_BG);
 
     for (size_t i = 0; i < VIDEO_PRESETS_N; i++) {
         ui_button_t b;
         video_preset_btn((int)i, &b);
-        ui_button(fb, LCD_W, LCD_H, &b, false);
+        ui_rrect(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY, UI_COLOR_PANEL);
+        ui_rrect_frame(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
+                       UI_COLOR_BORDER);
+        ui_circle(fb, LCD_W, LCD_H, b.x + 44, b.y + b.h / 2, 16, UI_COLOR_BG_PRESS);
+        ui_icon(&ui_icon_play, fb, LCD_W, LCD_H, b.x + 40, b.y + (b.h - 16) / 2, 1,
+                UI_COLOR_WARN);
+        int tw = ui_text_width(b.label, 3);
+        ui_text(fb, LCD_W, LCD_H, b.x + (b.w - tw) / 2 + 16,
+                b.y + (b.h - UI_FONT_H * 3) / 2, b.label, 3, UI_COLOR_FG, UI_COLOR_PANEL);
     }
 
     ui_button_t url = { 168, 356, 320, 64, "СВОЙ URL", BTN_MURL, 3 };
@@ -658,7 +763,7 @@ static void draw_video(uint16_t *fb)
     ui_button_t sd = { 536, 356, 320, 64, "SD-КАРТА", BTN_SD, 3 };
     ui_button(fb, LCD_W, LCD_H, &sd, false);
 
-    ui_button_t back = { 372, 436, 280, 56, "НАЗАД", BTN_MBACK, 3 };
+    ui_button_t back = { 372, 436, 280, 56, "В МЕНЮ", BTN_MBACK, 3 };
     ui_button(fb, LCD_W, LCD_H, &back, false);
 
     const char *hint = "MP4 (H.264 + AAC) по HTTP/HTTPS или с SD-карты";
@@ -683,7 +788,7 @@ static int video_hit(int x, int y)
     if (ui_button_hit(&sd, x, y)) {
         return BTN_SD;
     }
-    ui_button_t back = { 372, 436, 280, 56, "НАЗАД", BTN_MBACK, 3 };
+    ui_button_t back = { 372, 436, 280, 56, "В МЕНЮ", BTN_MBACK, 3 };
     if (ui_button_hit(&back, x, y)) {
         return BTN_MBACK;
     }
@@ -780,7 +885,7 @@ static void sd_file_btn(int vis_row, ui_button_t *b)
 {
     static char lab[SD_NAME_MAX + 8];
     const typeof(sd_files[0]) *f = &sd_files[sd_scroll + vis_row];
-    snprintf(lab, sizeof(lab), "%s %s", f->video ? "[V]" : "[A]", f->name);
+    snprintf(lab, sizeof(lab), "%s", f->name);
     b->x = 12;
     b->y = SD_ROWS_Y0 + vis_row * SD_ROW_STRIDE;
     b->w = LCD_W - 24;
@@ -798,9 +903,9 @@ static void draw_files(uint16_t *fb)
     ui_text(fb, LCD_W, LCD_H, 12, 44, "ФАЙЛЫ SD", UI_SCALE_TITLE,
             UI_COLOR_ACCENT, UI_COLOR_BG);
     char st[48];
-    snprintf(st, sizeof(st), "%s  ЗВУК:%d", media_state_str(), media_get_volume());
+    snprintf(st, sizeof(st), "%s", media_state_str());
     ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(st, UI_SCALE_TEXT) - 12,
-            52, st, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
+            52, st, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
 
     if (sd_mount_err) {
         const char *msg = "карта не читается (FAT32?) - ОБНОВИТЬ повторит";
@@ -818,7 +923,16 @@ static void draw_files(uint16_t *fb)
         for (int i = 0; i < rows; i++) {
             ui_button_t b;
             sd_file_btn(i, &b);
-            ui_button(fb, LCD_W, LCD_H, &b, false);
+            const typeof(sd_files[0]) *f = &sd_files[sd_scroll + i];
+            ui_rrect(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
+                     UI_COLOR_PANEL);
+            ui_rrect_frame(fb, LCD_W, LCD_H, b.x, b.y, b.x + b.w, b.y + b.h, UI_R_KEY,
+                           UI_COLOR_BORDER);
+            ui_icon(f->video ? &ui_icon_clap : &ui_icon_music,
+                    fb, LCD_W, LCD_H, b.x + 16, b.y + (b.h - 16) / 2, 1,
+                    f->video ? UI_COLOR_WARN : UI_COLOR_OK);
+            ui_text(fb, LCD_W, LCD_H, b.x + 44, b.y + (b.h - UI_FONT_H * 2) / 2,
+                    b.label, 2, UI_COLOR_FG, UI_COLOR_PANEL);
         }
         int left = sd_files_n - sd_scroll - rows;
         if (left > 0) {
@@ -886,7 +1000,7 @@ static void draw_urlin(uint16_t *fb)
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, CONTENT_Y1, UI_COLOR_BG);
     const char *target = br.urlin_video ? "адрес видео (MP4):" : "адрес потока (MP3/AAC):";
     ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 8, target, UI_SCALE_TEXT,
-            UI_COLOR_URL, UI_COLOR_BG);
+            UI_COLOR_DIM, UI_COLOR_BG);
     const char *hint = "GO внизу или справа - начать";
     ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(hint, 1) - 12, CONTENT_Y0 + 8,
             hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
@@ -944,7 +1058,7 @@ static void do_films_search(void)
     void *fb = NULL;
     app_lcd_get_fb(br.fb_idx, &fb);
     if (fb != NULL) {
-        draw_loading(fb, "фильмы");
+        draw_loading(fb, "ищем фильмы");
         app_lcd_flush(br.fb_idx);
         br.fb_idx ^= 1;
     }
@@ -954,7 +1068,7 @@ static void do_films_search(void)
     films_n = n;
     films_scroll = 0;
     if (err != ESP_OK) {
-        strlcpy(films_msg, "поиск не удался (сеть)", sizeof(films_msg));
+        strlcpy(films_msg, "archive.org не отвечает", sizeof(films_msg));
     } else if (n == 0) {
         strlcpy(films_msg, "ничего не найдено (попробуйте EN)", sizeof(films_msg));
     } else {
@@ -1015,9 +1129,10 @@ static void draw_films(uint16_t *fb)
     draw_url_row(fb);
 
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, CONTENT_Y1, UI_COLOR_BG);
-    const char *target = "каталог кино public-domain (archive.org):";
-    ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 8, target, UI_SCALE_TEXT,
-            UI_COLOR_URL, UI_COLOR_BG);
+
+    ui_icon(&ui_icon_film, fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 6, 1, UI_COLOR_ACCENT);
+    ui_text(fb, LCD_W, LCD_H, 34, CONTENT_Y0 + 5, "каталог кино (archive.org)",
+            UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
     const char *hint = "пустой запрос = популярное";
     ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(hint, 1) - 12, CONTENT_Y0 + 8,
             hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
@@ -1031,48 +1146,68 @@ static void draw_filmsr(uint16_t *fb)
     draw_url_row(fb);
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, LCD_H, UI_COLOR_BG);
 
+    int rows_max = (CONTENT_Y1_FULL - CONTENT_Y0) / ROW_H;
+
     if (films_n == 0) {
-        ui_text(fb, LCD_W, LCD_H,
-                (LCD_W - ui_text_width(films_msg, UI_SCALE_TEXT)) / 2,
-                CONTENT_Y0 + 60, films_msg, UI_SCALE_TEXT, UI_COLOR_ERR,
-                UI_COLOR_BG);
-        const char *hint = "нажмите, чтобы вернуться";
-        ui_text(fb, LCD_W, LCD_H,
-                (LCD_W - ui_text_width(hint, 1)) / 2, CONTENT_Y0 + 100,
-                hint, 1, UI_COLOR_BORDER, UI_COLOR_BG);
+        /* centered error/empty card */
+        int cw = 720, ch = 160;
+        int cx = (LCD_W - cw) / 2, cy = CONTENT_Y0 + 40;
+        ui_card(fb, LCD_W, LCD_H, cx, cy, cx + cw, cy + ch, false);
+        ui_icon(&ui_icon_warn, fb, LCD_W, LCD_H, cx + 24, cy + 24, 1, UI_COLOR_WARN);
+        char fitted[96];
+        ui_text_fit(fitted, sizeof(fitted),
+                    films_msg[0] ? films_msg : "ничего не найдено",
+                    cw - 120, UI_SCALE_TEXT);
+        ui_text(fb, LCD_W, LCD_H, cx + 56, cy + 26, fitted, UI_SCALE_TEXT,
+                films_msg[0] ? UI_COLOR_WARN : UI_COLOR_FG, UI_COLOR_PANEL);
+        const char *hint = "тап по экрану - вернуться к поиску";
+        ui_text(fb, LCD_W, LCD_H, cx + (cw - ui_text_width(hint, 1)) / 2, cy + ch - 40,
+                hint, 1, UI_COLOR_DIM, UI_COLOR_PANEL);
         return;
     }
 
     if (films_msg[0] != '\0') {
         char fitted[96];
-        ui_text_fit(fitted, sizeof(fitted), films_msg, LCD_W - 24, 1);
+        ui_text_fit(fitted, sizeof(fitted), films_msg, LCD_W - 100, 1);
         ui_text(fb, LCD_W, LCD_H, 12, CONTENT_Y0 + 2, fitted, 1,
-                UI_COLOR_ERR, UI_COLOR_BG);
+                UI_COLOR_WARN, UI_COLOR_BG);
     }
 
-    int rows = (CONTENT_Y1_FULL - CONTENT_Y0) / ROW_H;
+    char cnt[32];
+    snprintf(cnt, sizeof(cnt), "найдено: %d", films_n);
+    ui_text(fb, LCD_W, LCD_H, LCD_W - ui_text_width(cnt, 1) - 16, CONTENT_Y0 + 2,
+            cnt, 1, UI_COLOR_DIM, UI_COLOR_BG);
+
+    int y0 = CONTENT_Y0 + 18;
+    int rows = films_n - films_scroll;
+    if (rows > rows_max - 1) {
+        rows = rows_max - 1;
+    }
     for (int i = 0; i < rows; i++) {
         int idx = films_scroll + i;
-        if (idx >= films_n) {
-            break;
-        }
-        int y = CONTENT_Y0 + i * ROW_H;
+        int y = y0 + i * ROW_H;
+
+        ui_rrect(fb, LCD_W, LCD_H, 8, y, LCD_W - 8, y + ROW_H - 6, UI_R_KEY,
+                 UI_COLOR_PANEL);
+        ui_rrect_frame(fb, LCD_W, LCD_H, 8, y, LCD_W - 8, y + ROW_H - 6, UI_R_KEY,
+                       UI_COLOR_BORDER);
 
         char num[16];
         snprintf(num, sizeof(num), "%2d.", idx + 1);
-        ui_text(fb, LCD_W, LCD_H, 8, y + 8, num, UI_SCALE_TEXT,
-                UI_COLOR_URL, UI_COLOR_BG);
+        ui_text(fb, LCD_W, LCD_H, 20, y + (ROW_H - 6 - UI_FONT_H * 2) / 2, num,
+                UI_SCALE_TEXT, UI_COLOR_ACCENT, UI_COLOR_PANEL);
 
         char fitted[FILM_TITLE_MAX];
         ui_text_fit(fitted, sizeof(fitted), film_items[idx].title,
-                    LCD_W - 90, UI_SCALE_TEXT);
-        ui_text(fb, LCD_W, LCD_H, 56, y + 8, fitted, UI_SCALE_TEXT,
-                UI_COLOR_FG, UI_COLOR_BG);
+                    LCD_W - 140, UI_SCALE_TEXT);
+        ui_text(fb, LCD_W, LCD_H, 64, y + (ROW_H - 6 - UI_FONT_H * 2) / 2, fitted,
+                UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_PANEL);
 
-        ui_fill_rect(fb, LCD_W, LCD_H, 8, y + ROW_H - 1, LCD_W - 8, y + ROW_H,
-                     UI_COLOR_BAR);
+        ui_icon(&ui_icon_play, fb, LCD_W, LCD_H, LCD_W - 44, y + (ROW_H - 6 - 16) / 2,
+                1, UI_COLOR_ACCENT);
     }
 
+    draw_scrollbar(fb, y0, CONTENT_Y1_FULL, films_n, films_scroll, rows_max - 1);
     draw_nav_bar(fb);
 }
 
@@ -1085,20 +1220,29 @@ static void draw_splash(uint16_t *fb)
 
     const char *title = "CamBrowser";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(title, UI_SCALE_TITLE * 2)) / 2,
-            200, title, UI_SCALE_TITLE * 2, UI_COLOR_ACCENT, UI_COLOR_BG);
+            180, title, UI_SCALE_TITLE * 2, UI_COLOR_FG, UI_COLOR_BG);
 
-    const char *sub = "ethernet text browser on esp32-p4";
+    /* accent underline */
+    int tw = ui_text_width(title, UI_SCALE_TITLE * 2);
+    ui_rrect(fb, LCD_W, LCD_H, (LCD_W - tw) / 2, 240, (LCD_W + tw) / 2, 248,
+             4, UI_COLOR_ACCENT);
+
+    const char *sub = "интернет-браузер на ESP32-P4";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(sub, UI_SCALE_TEXT)) / 2,
-            280, sub, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
+            272, sub, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
+
+    /* spinner + status card */
+    int phase = (int)((esp_timer_get_time() / 250000LL) & 7);
+    ui_spinner(fb, LCD_W, LCD_H, LCD_W / 2, 350, 14, phase, UI_COLOR_ACCENT);
 
     char st[64];
-    snprintf(st, sizeof(st), "net: %s", app_eth_status_str());
+    snprintf(st, sizeof(st), "сеть: %s", app_eth_status_str());
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(st, UI_SCALE_TEXT)) / 2,
-            340, st, UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_BG);
+            392, st, UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_BG);
 
-    const char *hint = app_eth_ready() ? "starting..." : "connect the ethernet cable";
+    const char *hint = app_eth_ready() ? "запуск..." : "подключите кабель Ethernet";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
-            380, hint, UI_SCALE_TEXT, UI_COLOR_BORDER, UI_COLOR_BG);
+            424, hint, UI_SCALE_TEXT, UI_COLOR_BORDER, UI_COLOR_BG);
 }
 
 static void draw_home(uint16_t *fb)
@@ -1110,16 +1254,30 @@ static void draw_home(uint16_t *fb)
 
 #if CONFIG_EB_MEDIA_ENABLE
     for (size_t i = 0; i < HOME_APPS_N; i++) {
-        ui_button(fb, LCD_W, LCD_H, &home_apps[i], false);
+        const ui_button_t *b = &home_apps[i];
+        ui_rrect(fb, LCD_W, LCD_H, b->x, b->y, b->x + b->w, b->y + b->h,
+                 UI_R_CARD, UI_COLOR_PANEL);
+        ui_rrect_frame(fb, LCD_W, LCD_H, b->x, b->y, b->x + b->w, b->y + b->h,
+                       UI_R_CARD, UI_COLOR_BORDER);
+
+        const ui_icon_t *ic = home_app_icon(i);
+        uint16_t col = home_app_color[i];
+        /* icon on a soft circle */
+        ui_circle(fb, LCD_W, LCD_H, b->x + b->w / 2, b->y + 44, 24, UI_COLOR_BG_PRESS);
+        ui_icon(ic, fb, LCD_W, LCD_H, b->x + b->w / 2 - 16, b->y + 44 - 16, 2, col);
+
+        int tw = ui_text_width(b->label, 3);
+        ui_text(fb, LCD_W, LCD_H, b->x + (b->w - tw) / 2, b->y + 84, b->label, 3,
+                UI_COLOR_FG, UI_COLOR_PANEL);
     }
-    const char *hint = "поиск: введите запрос и нажмите GO";
+    const char *hint = "введите запрос и нажмите GO";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
-            296, hint, UI_SCALE_TEXT, UI_COLOR_BORDER, UI_COLOR_BG);
+            288, hint, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
 #else
     const char *hint = "type a search query, then GO";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
             (CONTENT_Y0 + CONTENT_Y1) / 2 - 8, hint, UI_SCALE_TEXT,
-            UI_COLOR_BORDER, UI_COLOR_BG);
+            UI_COLOR_DIM, UI_COLOR_BG);
 #endif
 
     draw_keyboard(fb);
@@ -1132,36 +1290,54 @@ static void draw_results(uint16_t *fb)
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, LCD_H, UI_COLOR_BG);
 
     if (br.serp_error || br.result_count == 0) {
-        const char *msg = br.serp_error ? "search failed - tap to go back"
-                                        : "no results (antibot page?) - tap to go back";
-        ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(msg, UI_SCALE_TEXT)) / 2,
-                CONTENT_Y0 + 60, msg, UI_SCALE_TEXT, UI_COLOR_ERR, UI_COLOR_BG);
+        const char *msg = br.serp_error ? "поиск не удался" : "ничего не найдено";
+        const char *hint = br.serp_error ? "антинбот или сеть - тап, чтобы вернуться"
+                                         : "попробуйте другой запрос - тап, чтобы вернуться";
+        int cw = 700, ch = 150;
+        int cx = (LCD_W - cw) / 2, cy = CONTENT_Y0 + 40;
+        ui_card(fb, LCD_W, LCD_H, cx, cy, cx + cw, cy + ch, false);
+        ui_icon(&ui_icon_warn, fb, LCD_W, LCD_H, cx + 24, cy + 24, 1, UI_COLOR_WARN);
+        ui_text(fb, LCD_W, LCD_H, cx + 56, cy + 26, msg, UI_SCALE_TEXT,
+                UI_COLOR_WARN, UI_COLOR_PANEL);
+        ui_text(fb, LCD_W, LCD_H, cx + 56, cy + 60, hint, 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+        const char *tap = "тап по экрану - назад";
+        ui_text(fb, LCD_W, LCD_H, cx + (cw - ui_text_width(tap, 1)) / 2, cy + ch - 36,
+                tap, 1, UI_COLOR_DIM, UI_COLOR_PANEL);
         return;
     }
 
+    int rows_max = (CONTENT_Y1_FULL - CONTENT_Y0) / ROW_H;
     int first = br.page_scroll;
-    int rows = (CONTENT_Y1_FULL - CONTENT_Y0) / ROW_H;
+    int rows = br.result_count - first;
+    if (rows > rows_max) {
+        rows = rows_max;
+    }
+    int y0 = CONTENT_Y0 + 4;
     for (int i = 0; i < rows; i++) {
         int idx = first + i;
-        if (idx >= br.result_count) {
-            break;
-        }
-        int y = CONTENT_Y0 + i * ROW_H;
+        int y = y0 + i * ROW_H;
+
+        ui_rrect(fb, LCD_W, LCD_H, 8, y, LCD_W - 8, y + ROW_H - 6, UI_R_KEY,
+                 UI_COLOR_PANEL);
+        ui_rrect_frame(fb, LCD_W, LCD_H, 8, y, LCD_W - 8, y + ROW_H - 6, UI_R_KEY,
+                       UI_COLOR_BORDER);
 
         char num[16]; /* >= 13: worst-case "%2d." is 11 (int) + '.' + NUL — GCC format-truncation */
         snprintf(num, sizeof(num), "%2d.", idx + 1);
-        ui_text(fb, LCD_W, LCD_H, 8, y + 8, num, UI_SCALE_TEXT, UI_COLOR_URL, UI_COLOR_BG);
+        ui_text(fb, LCD_W, LCD_H, 20, y + (ROW_H - 6 - UI_FONT_H * 2) / 2, num,
+                UI_SCALE_TEXT, UI_COLOR_ACCENT, UI_COLOR_PANEL);
 
         char fitted[WEB_RESULT_TITLE_MAX];
         ui_text_fit(fitted, sizeof(fitted), br.results[idx].title,
-                    LCD_W - 90, UI_SCALE_TEXT);
-        ui_text(fb, LCD_W, LCD_H, 56, y + 8, fitted, UI_SCALE_TEXT,
-                UI_COLOR_FG, UI_COLOR_BG);
+                    LCD_W - 110, UI_SCALE_TEXT);
+        ui_text(fb, LCD_W, LCD_H, 64, y + (ROW_H - 6 - UI_FONT_H * 2) / 2, fitted,
+                UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_PANEL);
 
-        ui_fill_rect(fb, LCD_W, LCD_H, 8, y + ROW_H - 1, LCD_W - 8, y + ROW_H,
-                     UI_COLOR_BAR);
+        ui_icon(&ui_icon_back, fb, LCD_W, LCD_H, LCD_W - 36, y + (ROW_H - 6 - 16) / 2,
+                1, UI_COLOR_DIM);
     }
 
+    draw_scrollbar(fb, y0, CONTENT_Y1_FULL, br.result_count, first, rows_max);
     draw_nav_bar(fb);
 }
 
@@ -1172,10 +1348,15 @@ static void draw_page(uint16_t *fb)
     ui_fill_rect(fb, LCD_W, LCD_H, 0, CONTENT_Y0, LCD_W, LCD_H, UI_COLOR_BG);
 
     if (br.page_text == NULL || br.line_count == 0) {
-        const char *msg = br.page_text == NULL ? "page load failed - tap for back"
-                                               : "empty page - tap for back";
-        ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(msg, UI_SCALE_TEXT)) / 2,
-                CONTENT_Y0 + 60, msg, UI_SCALE_TEXT, UI_COLOR_ERR, UI_COLOR_BG);
+        const char *msg = br.page_text == NULL ? "страница не открылась" : "пустая страница";
+        const char *hint = "тап по экрану - назад к результатам";
+        int cw = 640, ch = 120;
+        int cx = (LCD_W - cw) / 2, cy = CONTENT_Y0 + 60;
+        ui_card(fb, LCD_W, LCD_H, cx, cy, cx + cw, cy + ch, false);
+        ui_icon(&ui_icon_warn, fb, LCD_W, LCD_H, cx + 24, cy + 24, 1, UI_COLOR_WARN);
+        ui_text(fb, LCD_W, LCD_H, cx + 56, cy + 26, msg, UI_SCALE_TEXT,
+                UI_COLOR_WARN, UI_COLOR_PANEL);
+        ui_text(fb, LCD_W, LCD_H, cx + 56, cy + 60, hint, 1, UI_COLOR_DIM, UI_COLOR_PANEL);
         return;
     }
 
@@ -1200,6 +1381,9 @@ static void draw_page(uint16_t *fb)
                 UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_BG);
     }
 
+    /* page scroll indicator */
+    draw_scrollbar(fb, CONTENT_Y0, CONTENT_Y1_FULL, br.line_count, br.page_scroll, rows);
+
     draw_nav_bar(fb);
 }
 
@@ -1209,12 +1393,26 @@ static void draw_loading(uint16_t *fb, const char *what)
     draw_status_bar(fb);
 
     static int dots = 0;
-    char msg[64];
     dots = (dots + 1) % 4;
-    snprintf(msg, sizeof(msg), "%s%s", what, "..." + (3 - dots));
 
-    ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(msg, UI_SCALE_TITLE)) / 2,
-            280, msg, UI_SCALE_TITLE, UI_COLOR_ACCENT, UI_COLOR_BG);
+    int cw = 620, ch = 220;
+    int cx = (LCD_W - cw) / 2, cy = (LCD_H - ch) / 2 + 16;
+    ui_card(fb, LCD_W, LCD_H, cx, cy, cx + cw, cy + ch, false);
+
+    int phase = (int)((esp_timer_get_time() / 250000LL) & 7);
+    ui_spinner(fb, LCD_W, LCD_H, cx + cw / 2, cy + 52, 16, phase, UI_COLOR_ACCENT);
+
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%s%s", what, "..." + (3 - dots));
+    ui_text(fb, LCD_W, LCD_H, cx + (cw - ui_text_width(msg, UI_SCALE_TITLE)) / 2,
+            cy + 96, msg, UI_SCALE_TITLE, UI_COLOR_FG, UI_COLOR_PANEL);
+
+    const char *l1 = "идёт загрузка из сети";
+    ui_text(fb, LCD_W, LCD_H, cx + (cw - ui_text_width(l1, 1)) / 2, cy + 140,
+            l1, 1, UI_COLOR_DIM, UI_COLOR_PANEL);
+    const char *l2 = "обычно 5-30 секунд, просто подождите";
+    ui_text(fb, LCD_W, LCD_H, cx + (cw - ui_text_width(l2, 1)) / 2, cy + 160,
+            l2, 1, UI_COLOR_BORDER, UI_COLOR_PANEL);
 }
 
 static void draw_screen(void)
@@ -1237,9 +1435,9 @@ static void draw_screen(void)
     switch (br.state) {
     case ST_SPLASH:   draw_splash(fb);       break;
     case ST_HOME:     draw_home(fb);         break;
-    case ST_LOADING:  draw_loading(fb, "searching");  break;
+    case ST_LOADING:  draw_loading(fb, "ищем");  break;
     case ST_RESULTS:  draw_results(fb);      break;
-    case ST_PAGELOAD: draw_loading(fb, "loading");    break;
+    case ST_PAGELOAD: draw_loading(fb, "открываем страницу");    break;
     case ST_PAGE:     draw_page(fb);         break;
 #if CONFIG_EB_MEDIA_ENABLE
     case ST_RADIO:    draw_radio(fb);        break;
@@ -1255,6 +1453,7 @@ static void draw_screen(void)
     app_lcd_flush(br.fb_idx);
     br.fb_idx ^= 1;
 }
+
 
 /* --- Actions -------------------------------------------------------------------- */
 
@@ -1780,3 +1979,78 @@ void browser_start(void)
         ESP_LOGE(TAG, "failed to create browser task");
     }
 }
+
+
+/* --- Host-only preview hook -------------------------------------------------
+ * Compiled out of the firmware build (-UCAMOS_UI_PREVIEW is the default).
+ * scripts/uihost uses it to render the actual browser drawing code into
+ * BMP files so UI changes can be reviewed on a PC without hardware. */
+#ifdef CAMOS_UI_PREVIEW
+void ui_preview_set(int st, const char *q, int eng, int scroll,
+                    const film_item_t *films, int nf, const char *msg,
+                    int nres, const char *const *res_titles);
+void ui_preview_set(int st, const char *q, int eng, int scroll,
+                    const film_item_t *films, int nf, const char *msg,
+                    int nres, const char *const *res_titles)
+{
+    memset(&br, 0, sizeof(br));
+    br.fb_idx = 0;
+    br.state = (browser_state_t)st;
+    if (q != NULL) {
+        strlcpy(br.query, q, sizeof(br.query));
+    }
+    br.engine_google = eng;
+    br.page_scroll = scroll;
+#if CONFIG_EB_MEDIA_ENABLE
+    films_scroll = scroll;
+    films_n = nf;
+    films_msg[0] = '\0';
+    if (msg != NULL) {
+        strlcpy(films_msg, msg, sizeof(films_msg));
+    }
+    if (films != NULL) {
+        for (int i = 0; i < nf && i < FILMS_MAX; i++) {
+            film_items[i] = films[i];
+        }
+    }
+#endif
+    br.result_count = nres;
+    if (res_titles != NULL) {
+        for (int i = 0; i < nres && i < WEB_RESULTS_MAX; i++) {
+            strlcpy(br.results[i].title, res_titles[i], WEB_RESULT_TITLE_MAX);
+            strlcpy(br.results[i].url, "https://example.com/page", WEB_RESULT_URL_MAX);
+        }
+    }
+    draw_screen();
+}
+
+/* Host-only: render ST_PAGE with the given plain text */
+void ui_preview_page(const char *text)
+{
+    memset(&br, 0, sizeof(br));
+    br.fb_idx = 0;
+    br.page_text = strdup(text);
+    page_wrap();
+    br.state = ST_PAGE;
+    draw_screen();
+}
+
+/* Host-only: render ST_FILES with the given names (video != 0 => video) */
+void ui_preview_sd(const char *const *names, const int *video, int n, int err)
+{
+    memset(&br, 0, sizeof(br));
+    br.fb_idx = 0;
+    sd_files_n = 0;
+    sd_mount_err = err;
+    sd_scroll = 0;
+    if (!err && names != NULL) {
+        for (int i = 0; i < n && i < SD_FILES_MAX; i++) {
+            strlcpy(sd_files[sd_files_n].name, names[i], SD_NAME_MAX);
+            sd_files[sd_files_n].video = (video[i] != 0);
+            sd_files_n++;
+        }
+    }
+    br.state = ST_FILES;
+    draw_screen();
+}
+#endif /* CAMOS_UI_PREVIEW */

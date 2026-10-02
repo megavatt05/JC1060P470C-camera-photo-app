@@ -4,16 +4,23 @@
  * CamBrowser UI primitives for RGB565 frame buffers.
  *
  * Thin drawing layer on top of the shared 8x8 font (app_overlay_font8x8):
- * filled rectangles, clipped text, boxes and frames. All functions are
- * silent no-ops on out-of-range arguments; every writer clips to fb_w/fb_h
- * so a bad layout can never write past the end of the DPI frame buffer
- * (the class of bug fixed in commit 68da2b8 for the PPA path).
+ * rounded cards, clipped text, flat icons, progress bars and buttons.
+ * All functions are silent no-ops on out-of-range arguments; every writer
+ * clips to fb_w/fb_h so a bad layout can never write past the end of the
+ * DPI frame buffer (the class of bug fixed in commit 68da2b8 for the PPA
+ * path).
+ *
+ * Theme v2 "friendly dark": deep navy background, panel cards, one cyan
+ * accent. Designed after the manufacturer's esp-brookesia phone demo
+ * (status bar + rounded app cards) but drawn with plain RGB565 spans so
+ * it costs no extra RAM.
  */
 
 #include <stdio.h>
 #include <string.h>
 #include "app_overlay.h"
 #include "camos/ui.h"
+#include "camos/ui_icons.h"
 
 /* Decode one UTF-8 codepoint at p (NUL-safe). Advances *pp past the whole
  * sequence. Returns the codepoint, or -1 for an invalid/overlong sequence
@@ -76,6 +83,113 @@ void ui_frame(uint16_t *fb, int fb_w, int fb_h,
     ui_fill_rect(fb, fb_w, fb_h, x0, y1 - thick, x1, y1, color);          /* bottom */
     ui_fill_rect(fb, fb_w, fb_h, x0, y0, x0 + thick, y1, color);          /* left */
     ui_fill_rect(fb, fb_w, fb_h, x1 - thick, y0, x1, y1, color);          /* right */
+}
+
+/* Integer sqrt good enough for corner insets (r <= 32) */
+static int ui_isqrt(int v)
+{
+    int r = 0;
+    while ((r + 1) * (r + 1) <= v) {
+        r++;
+    }
+    return r;
+}
+
+void ui_rrect(uint16_t *fb, int fb_w, int fb_h,
+              int x0, int y0, int x1, int y1, int r, uint16_t color)
+{
+    if (fb == NULL || x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    int h = y1 - y0, w = x1 - x0;
+    if (r > h / 2) {
+        r = h / 2;
+    }
+    if (r > w / 2) {
+        r = w / 2;
+    }
+    if (r <= 0) {
+        ui_fill_rect(fb, fb_w, fb_h, x0, y0, x1, y1, color);
+        return;
+    }
+
+    /* middle band: full width */
+    ui_fill_rect(fb, fb_w, fb_h, x0, y0 + r, x1, y1 - r, color);
+    /* top/bottom strips between the corner arcs */
+    ui_fill_rect(fb, fb_w, fb_h, x0 + r, y0, x1 - r, y0 + r, color);
+    ui_fill_rect(fb, fb_w, fb_h, x0 + r, y1 - r, x1 - r, y1, color);
+
+    /* corners: per-row inset from the circle equation */
+    for (int dy = 0; dy < r; dy++) {
+        int ry = r - 1 - dy;                 /* 0 at the outermost row */
+        int dx = r - ui_isqrt(r * r - ry * ry);
+        int y_top = y0 + dy;
+        int y_bot = y1 - 1 - dy;
+        /* top-left + top-right */
+        ui_fill_rect(fb, fb_w, fb_h, x0 + dx, y_top, x0 + r, y_top + 1, color);
+        ui_fill_rect(fb, fb_w, fb_h, x1 - r, y_top, x1 - dx, y_top + 1, color);
+        /* bottom-left + bottom-right */
+        ui_fill_rect(fb, fb_w, fb_h, x0 + dx, y_bot, x0 + r, y_bot + 1, color);
+        ui_fill_rect(fb, fb_w, fb_h, x1 - r, y_bot, x1 - dx, y_bot + 1, color);
+    }
+}
+
+void ui_rrect_frame(uint16_t *fb, int fb_w, int fb_h,
+                    int x0, int y0, int x1, int y1, int r, uint16_t color)
+{
+    if (fb == NULL || x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    int h = y1 - y0, w = x1 - x0;
+    if (r > h / 2) {
+        r = h / 2;
+    }
+    if (r > w / 2) {
+        r = w / 2;
+    }
+    if (r <= 0) {
+        ui_frame(fb, fb_w, fb_h, x0, y0, x1, y1, 1, color);
+        return;
+    }
+
+    /* straight edges (1 px) */
+    ui_fill_rect(fb, fb_w, fb_h, x0 + r, y0, x1 - r, y0 + 1, color);
+    ui_fill_rect(fb, fb_w, fb_h, x0 + r, y1 - 1, x1 - r, y1, color);
+    ui_fill_rect(fb, fb_w, fb_h, x0, y0 + r, x0 + 1, y1 - r, color);
+    ui_fill_rect(fb, fb_w, fb_h, x1 - 1, y0 + r, x1, y1 - r, color);
+
+    /* arcs: one pixel per row at the circle boundary */
+    for (int dy = 0; dy < r; dy++) {
+        int ry = r - 1 - dy;
+        int dx = r - ui_isqrt(r * r - ry * ry);
+        int y_top = y0 + dy;
+        int y_bot = y1 - 1 - dy;
+        ui_fill_rect(fb, fb_w, fb_h, x0 + dx, y_top, x0 + dx + 1, y_top + 1, color);
+        ui_fill_rect(fb, fb_w, fb_h, x1 - dx - 1, y_top, x1 - dx, y_top + 1, color);
+        ui_fill_rect(fb, fb_w, fb_h, x0 + dx, y_bot, x0 + dx + 1, y_bot + 1, color);
+        ui_fill_rect(fb, fb_w, fb_h, x1 - dx - 1, y_bot, x1 - dx, y_bot + 1, color);
+    }
+}
+
+void ui_circle(uint16_t *fb, int fb_w, int fb_h,
+               int cx, int cy, int r, uint16_t color)
+{
+    if (fb == NULL || r <= 0) {
+        return;
+    }
+    for (int dy = -r; dy <= r; dy++) {
+        int dx = ui_isqrt(r * r - dy * dy);
+        ui_fill_rect(fb, fb_w, fb_h, cx - dx, cy + dy, cx + dx + 1, cy + dy + 1, color);
+    }
+}
+
+void ui_card(uint16_t *fb, int fb_w, int fb_h,
+             int x0, int y0, int x1, int y1, bool pressed)
+{
+    ui_rrect(fb, fb_w, fb_h, x0, y0, x1, y1, UI_R_CARD,
+             pressed ? UI_COLOR_BG_PRESS : UI_COLOR_PANEL);
+    ui_rrect_frame(fb, fb_w, fb_h, x0, y0, x1, y1, UI_R_CARD,
+                   pressed ? UI_COLOR_ACCENT : UI_COLOR_BORDER);
 }
 
 int ui_text_width(const char *s, int scale)
@@ -178,14 +292,80 @@ void ui_box_text(uint16_t *fb, int fb_w, int fb_h,
     ui_text(fb, fb_w, fb_h, x, y, s, scale, fg, bg);
 }
 
+void ui_icon(const struct ui_icon *ic, uint16_t *fb, int fb_w, int fb_h,
+             int x, int y, int scale, uint16_t fg)
+{
+    if (fb == NULL || ic == NULL || scale <= 0) {
+        return;
+    }
+    for (int row = 0; row < UI_ICON_H; row++) {
+        uint16_t bits = ic->row[row];
+        int py = y + row * scale;
+        int col = 0;
+        while (col < UI_ICON_W) {
+            if (!((bits >> (15 - col)) & 0x1)) {
+                col++;
+                continue;
+            }
+            int run = 0;
+            while (col + run < UI_ICON_W && ((bits >> (15 - col - run)) & 0x1)) {
+                run++;
+            }
+            ui_fill_rect(fb, fb_w, fb_h, x + col * scale, py,
+                         x + (col + run) * scale, py + scale, fg);
+            col += run;
+        }
+    }
+}
+
+void ui_progress(uint16_t *fb, int fb_w, int fb_h,
+                 int x, int y, int w, int h, float frac, uint16_t color)
+{
+    if (fb == NULL || w <= 0 || h <= 0) {
+        return;
+    }
+    if (frac < 0.0f) {
+        frac = 0.0f;
+    }
+    if (frac > 1.0f) {
+        frac = 1.0f;
+    }
+    int r = h / 2;
+    ui_rrect(fb, fb_w, fb_h, x, y, x + w, y + h, r, UI_COLOR_KEY);
+    ui_rrect_frame(fb, fb_w, fb_h, x, y, x + w, y + h, r, UI_COLOR_BORDER);
+    int fw = (int)(w * frac);
+    if (fw > h) {
+        ui_rrect(fb, fb_w, fb_h, x, y, x + fw, y + h, r, color);
+    } else if (fw > 0) {
+        ui_fill_rect(fb, fb_w, fb_h, x, y, x + fw, y + h, color);
+    }
+}
+
+void ui_spinner(uint16_t *fb, int fb_w, int fb_h,
+                int cx, int cy, int r, int phase, uint16_t color)
+{
+    if (fb == NULL || r <= 0) {
+        return;
+    }
+    static const int sin8[8] = { 0, 5, 7, 7, 7, 5, 0, -5 };  /* cos/sin x8, 45° steps */
+    for (int i = 0; i < 3; i++) {
+        int a = (phase + i * 3) & 7;
+        int dx = sin8[a] * r / 8;
+        int dy = sin8[(a + 2) & 7] * r / 8;
+        ui_circle(fb, fb_w, fb_h, cx + dx, cy + dy, 2 + (i == 0 ? 1 : 0), color);
+    }
+}
+
 void ui_button(uint16_t *fb, int fb_w, int fb_h,
                const ui_button_t *b, bool pressed)
 {
-    uint16_t bg  = pressed ? UI_COLOR_BG_PRESS : UI_COLOR_BG_BTN;
+    uint16_t bg  = pressed ? UI_COLOR_BG_PRESS : UI_COLOR_KEY;
     uint16_t txt = pressed ? UI_COLOR_ACCENT  : UI_COLOR_FG;
 
-    ui_fill_rect(fb, fb_w, fb_h, b->x, b->y, b->x + b->w, b->y + b->h, bg);
-    ui_frame(fb, fb_w, fb_h, b->x, b->y, b->x + b->w, b->y + b->h, 2, UI_COLOR_BORDER);
+    int r = (b->h >= 40) ? UI_R_KEY : 6;
+    ui_rrect(fb, fb_w, fb_h, b->x, b->y, b->x + b->w, b->y + b->h, r, bg);
+    ui_rrect_frame(fb, fb_w, fb_h, b->x, b->y, b->x + b->w, b->y + b->h, r,
+                   pressed ? UI_COLOR_ACCENT : UI_COLOR_BORDER);
 
     int sc = (b->scale > 0) ? b->scale : UI_SCALE_BTN;
 
