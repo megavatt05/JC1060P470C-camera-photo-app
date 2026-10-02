@@ -67,15 +67,38 @@ menu "CamBrowser (Ethernet Browser on LCD)"
 
     config EB_TOUCH_I2C_SCL
         int "Touch I2C SCL GPIO"
-        default 6
+        default 8
         help
             The touch controller of the board is not documented; the
             driver probes GT911 (0x5D/0x14), FT5x06 (0x38) and CST816
-            (0x15) on this bus. Verify pins against the board schematic.
+            (0x15) on this bus. The default (GPIO8) is the former camera
+            SCCB SCL - on JC1060P470-family boards the touch controller
+            usually shares that I2C bus with the (removed) sensor.
 
     config EB_TOUCH_I2C_SDA
         int "Touch I2C SDA GPIO"
+        default 7
+        help
+            Default GPIO7 = former camera SCCB SDA (same shared bus).
+
+    config EB_TOUCH_RST_GPIO
+        int "Touch controller reset GPIO (-1 = not wired)"
         default 5
+        help
+            Active-low reset of the touch controller. On the JC1060P470C
+            the GT911 RST is wired to GPIO5 (board docs). Without a reset
+            pulse a GT911 held in reset never ACKs on I2C and every probe
+            fails. Set to -1 if the reset line is not wired on your board.
+
+    config EB_TOUCH_INT_GPIO
+        int "Touch INT GPIO (GT911 address select, -1 = floating)"
+        default -1
+        help
+            At reset release the GT911 latches its I2C address from the
+            INT pin level: low -> 0x5D, high/floating -> 0x14. When wired,
+            the probe drives it low for a deterministic address, then
+            releases it back to input. -1 = leave floating (both 0x5D and
+            0x14 are probed anyway).
 
     config EB_TOUCH_SWAP_XY
         bool "Touch: swap X/Y"

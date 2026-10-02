@@ -5,10 +5,19 @@
  * touch controllers on cheap ESP32-P4 boards (GT911 / FT5x06 / CST816),
  * with automatic probing on the configured I2C bus.
  *
- * The controller of the JC1060P470C is not documented (see CAMOS.md, risk
- * list), so instead of hard-pinning one driver we probe a small table of
- * candidates at boot and use whichever answers. All drivers are polled
- * (no INT line required) at the rate the browser task needs (~30 Hz).
+ * v2 changes (touch debugging on real hardware):
+ *  - Optional hardware reset of the touch controller before probing
+ *    (EB_TOUCH_RST_GPIO, active low; on JC1060P470C the GT911 RST is
+ *    wired to GPIO5). A chip held in reset never answers on I2C - the
+ *    #1 cause of "no touch controller found".
+ *  - Optional EB_TOUCH_INT_GPIO driven low during the reset: the GT911
+ *    latches its I2C address from INT at reset release (low -> 0x5D,
+ *    high -> 0x14), making the address deterministic.
+ *  - Relaxed GT9xx family ID check: GT9271/GT928/etc. report product
+ *    IDs other than "911" and were wrongly rejected before.
+ *  - Full I2C bus scan (i2c_master_probe, 0x08..0x77) logged at INFO
+ *    level on every bus where probing failed, so the real address and
+ *    bus can be read straight from the boot log.
  *
  * Registers used (public datasheet knowledge):
  *   GT911   0x5D/0x14, 16-bit regs: product id 0x8140..0x8143,
@@ -21,9 +30,11 @@
  */
 
 #include <string.h>
+#include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "app_lcd.h"
 #include "sdkconfig.h"
@@ -46,6 +57,53 @@ static struct {
     int max_points;
 } s_tp;
 
+/* --- Hardware reset (GT911 needs it to answer at all) --------------------- */
+
+static void touch_hw_reset(void)
+{
+#if CONFIG_EB_TOUCH_RST_GPIO >= 0
+    gpio_config_t rst_io = {
+        .pin_bit_mask = 1ULL << CONFIG_EB_TOUCH_RST_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&rst_io) != ESP_OK) {
+        ESP_LOGW(TAG, "touch RST GPIO%d config failed", CONFIG_EB_TOUCH_RST_GPIO);
+        return;
+    }
+
+#if CONFIG_EB_TOUCH_INT_GPIO >= 0
+    /* Drive INT before the reset release: GT911 latches its I2C address
+     * from the INT level at reset deassert (low -> 0x5D). */
+    gpio_config_t int_io = {
+        .pin_bit_mask = 1ULL << CONFIG_EB_TOUCH_INT_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&int_io) == ESP_OK) {
+        gpio_set_level(CONFIG_EB_TOUCH_INT_GPIO, 0);
+    }
+#endif
+
+    gpio_set_level(CONFIG_EB_TOUCH_RST_GPIO, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(CONFIG_EB_TOUCH_RST_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(60));      /* GT911: 50 ms+ before I2C ready */
+
+#if CONFIG_EB_TOUCH_INT_GPIO >= 0
+    /* Release INT: back to input, the chip drives it when data is ready */
+    gpio_set_direction(CONFIG_EB_TOUCH_INT_GPIO, GPIO_MODE_INPUT);
+#endif
+
+    ESP_LOGI(TAG, "touch hw reset done (RST=GPIO%d, INT=GPIO%d)",
+             CONFIG_EB_TOUCH_RST_GPIO, CONFIG_EB_TOUCH_INT_GPIO);
+#else
+    ESP_LOGI(TAG, "touch hw reset disabled (EB_TOUCH_RST_GPIO=-1)");
+#endif
+}
+
+/* --- I2C bus plumbing ------------------------------------------------------ */
+
 static esp_err_t tp_bus_init(int port, int scl, int sda)
 {
     if (s_tp.bus != NULL) {
@@ -63,10 +121,28 @@ static esp_err_t tp_bus_init(int port, int scl, int sda)
 
     esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_tp.bus);
     if (err != ESP_OK) {
-        ESP_LOGD(TAG, "i2c bus port %d (SCL=%d SDA=%d) init failed: %s",
+        ESP_LOGW(TAG, "i2c bus port %d (SCL=%d SDA=%d) init failed: %s",
                  port, scl, sda, esp_err_to_name(err));
     }
     return err;
+}
+
+/* Diagnostic: log every address that ACKs on this bus. Runs only when the
+ * candidate probes failed - its output tells exactly where the controller
+ * (or anything else) actually sits. */
+static void tp_bus_scan(i2c_master_bus_handle_t bus, int port, int scl, int sda)
+{
+    ESP_LOGI(TAG, "I2C scan port %d (SCL=%d SDA=%d):", port, scl, sda);
+    int found = 0;
+    for (uint16_t a = 0x08; a < 0x78; a++) {
+        if (i2c_master_probe(bus, a, 20) == ESP_OK) {
+            ESP_LOGI(TAG, "  responder at 0x%02X", (unsigned)a);
+            found++;
+        }
+    }
+    if (found == 0) {
+        ESP_LOGW(TAG, "  no I2C devices responded on this bus");
+    }
 }
 
 /* Add an I2C device and read the chip-identifying register(s).
@@ -93,7 +169,18 @@ static esp_err_t tp_probe_one(uint8_t addr, touch_chip_t chip)
         /* 16-bit register address, high byte first on the wire */
         uint8_t reg[2] = { 0x81, 0x40 };    /* 0x8140 product id */
         err = i2c_master_transmit_receive(dev, reg, 2, id, 4, 100);
-        id_ok = (err == ESP_OK) && id[0] == '9' && id[1] == '1' && id[2] == '1';
+        /* GT911 answers "911\0"; GT9271/GT928 answer "9271"/"928\0" etc.
+         * Accept any GT9xx ("9" + two digits) - v1 wrongly rejected them. */
+        id_ok = (err == ESP_OK) &&
+                id[0] == '9' &&
+                isdigit((unsigned char)id[1]) &&
+                isdigit((unsigned char)id[2]);
+        if (err == ESP_OK && !id_ok) {
+            ESP_LOGW(TAG, "GT9xx probe 0x%02X: answered with id "
+                     "'%c%c%c%c' (0x%02X 0x%02X 0x%02X 0x%02X) - not accepted",
+                     addr, id[0], id[1], id[2], id[3],
+                     id[0], id[1], id[2], id[3]);
+        }
         break;
     }
     case TOUCH_CHIP_FT5X06: {
@@ -134,6 +221,10 @@ esp_err_t touch_init(void)
      * reset before I2C becomes responsive (GT911 especially). */
     vTaskDelay(pdMS_TO_TICKS(100));
 
+    /* Hardware reset BEFORE any probing: a GT911 held in reset by its RST
+     * line never ACKs, and every probe below would fail misleadingly. */
+    touch_hw_reset();
+
     static const struct {
         uint8_t addr;
         touch_chip_t chip;
@@ -144,9 +235,9 @@ esp_err_t touch_init(void)
         { 0x15, TOUCH_CHIP_CST816 },
     };
 
-    /* Bus candidates, tried in order. First: the menuconfig pins. Then the
-     * former camera-SCCB bus pins - on JC1060P470-family boards the touch
-     * controller usually shares that I2C bus with the (now removed) sensor. */
+    /* Bus candidates, tried in order. First: the menuconfig pins (defaults
+     * are the former camera-SCCB bus - on JC1060P470-family boards the
+     * touch controller shares that I2C bus with the sensor). */
     static const struct {
         int port, scl, sda;
     } buses[] = {
@@ -170,21 +261,26 @@ esp_err_t touch_init(void)
                          s_tp.addr, buses[b].port, buses[b].scl, buses[b].sda);
                 return ESP_OK;
             }
-            ESP_LOGD(TAG, "probe 0x%02X chip %d failed: %s",
+            ESP_LOGI(TAG, "probe 0x%02X chip %d failed: %s",
                      candidates[i].addr, candidates[i].chip, esp_err_to_name(err));
         }
 
-        /* nothing on this bus - release it and try the next candidate */
+        /* nothing on this bus - scan it for diagnostics, then move on */
+        tp_bus_scan(s_tp.bus, buses[b].port, buses[b].scl, buses[b].sda);
         i2c_del_master_bus(s_tp.bus);
         s_tp.bus = NULL;
     }
 
-    ESP_LOGW(TAG, "no touch controller found (tried port %d SCL=%d SDA=%d, "
-             "then SCL=8 SDA=7 on ports 0 and 1); browser runs without input",
+    ESP_LOGW(TAG, "no touch controller found (RST=GPIO%d, tried port %d "
+             "SCL=%d SDA=%d, then SCL=8 SDA=7 on ports 0 and 1); "
+             "browser runs without input - check the I2C scan above",
+             CONFIG_EB_TOUCH_RST_GPIO,
              CONFIG_EB_TOUCH_I2C_PORT, CONFIG_EB_TOUCH_I2C_SCL,
              CONFIG_EB_TOUCH_I2C_SDA);
     return ESP_ERR_NOT_FOUND;
 }
+
+/* --- Coordinate reading ----------------------------------------------------- */
 
 static int tp_normalize(int v, int max_v)
 {
