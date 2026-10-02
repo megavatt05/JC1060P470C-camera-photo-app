@@ -1,40 +1,37 @@
-name: ESP32-P4 Firmware Build CI (v6.0.3)
+name: ESP32-P4 Ethernet Browser Build CI
 
-# Сценарии срабатывания CI: при пуше в главную ветку или ручном запуске
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: 
+      - "main"
+      - "feature/ethernet-browser"
   pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # Позволяет запускать сборку кнопкой вручную в UI GitHub
+    branches: 
+      - "main"
+      - "feature/ethernet-browser"
+  workflow_dispatch: 
 
 jobs:
   build_firmware:
     runs-on: ubuntu-latest
-    
-    # Запуск внутри официального Docker-контейнера Espressif с тегом v6.0.3
     container: espressif/idf:v6.0.3
 
     steps:
-      # Шаг 1: Клонирование вашего репозитория
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive' # Подгружает submodules, если ваш проект их использует
+          submodules: 'recursive'
 
-      # Шаг 2: Установка целевого микроконтроллера на esp32p4
       - name: Set Target Chip to ESP32-P4
         run: idf.py set-target esp32p4
 
-      # Шаг 3: Компиляция проекта
       - name: Build Project
         run: idf.py build
 
-      # Шаг 4: Сохранение результатов сборки
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: esp32p4-binaries
+          name: jc1060p470c-browser-binaries
           path: |
             build/*.bin
             build/bootloader/bootloader.bin
