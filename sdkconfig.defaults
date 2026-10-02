@@ -35,6 +35,21 @@ CONFIG_ETH_ENABLED=y
 CONFIG_ETH_USE_ESP32_EMAC=y
 CONFIG_ETH_PHY_INTERFACE_RMII=y
 
+# --- Тачскрин (GT911 на шине бывшей камеры SCCB) ---
+# Пины проверены отладкой v2 на реальной плате: контроллер висит на шине
+# бывшего SCCB сенсора (SCL=8 / SDA=7), порт 1. Без аппаратного сброса
+# (RST=GPIO5) GT911 не отвечает на I2C вообще - см. main/camos/touch.c.
+# INT не подключён (-1): адрес 0x5D/0x14 перебирается при пробе.
+CONFIG_EB_TOUCH_I2C_PORT=1
+CONFIG_EB_TOUCH_I2C_SCL=8
+CONFIG_EB_TOUCH_I2C_SDA=7
+CONFIG_EB_TOUCH_RST_GPIO=5
+CONFIG_EB_TOUCH_INT_GPIO=-1
+# Ориентация тача 1024x600 (landscape) корректна "как есть":
+# CONFIG_EB_TOUCH_SWAP_XY is not set
+# CONFIG_EB_TOUCH_MIRROR_X is not set
+# CONFIG_EB_TOUCH_MIRROR_Y is not set
+
 # CONFIG_PM_ENABLE is not set
 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
 
