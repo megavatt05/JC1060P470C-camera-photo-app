@@ -1,11 +1,11 @@
 name: ESP32-P4 Firmware Build CI (v6.0.3)
+
 on:
   push:
     branches: [ "main", "master", "feature/ethernet-browser" ]
   pull_request:
     branches: [ "main", "master", "feature/ethernet-browser" ]
   workflow_dispatch: 
-
 
 jobs:
   build_firmware:
@@ -19,15 +19,19 @@ jobs:
           submodules: 'recursive'
 
       - name: Set Target Chip to ESP32-P4
-        run: idf.py set-target esp32p4
+        run: |
+          . /opt/esp-idf/export.sh
+          idf.py set-target esp32p4
 
       - name: Build Project
-        run: idf.py build
+        run: |
+          . /opt/esp-idf/export.sh
+          idf.py build
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: jc1060p470c-browser-binaries
+          name: esp32p4-binaries
           path: |
             build/*.bin
             build/bootloader/bootloader.bin
