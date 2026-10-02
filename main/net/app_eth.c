@@ -38,6 +38,7 @@
 #include "driver/gpio.h"
 #include "sdkconfig.h"
 #include "net/app_eth.h"
+#include "net/log_server.h"
 
 static const char *TAG = "app_eth";
 
@@ -95,6 +96,9 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
     snprintf(s_eth.ip_str, sizeof(s_eth.ip_str), IPSTR, IP2STR(&ip->ip));
     eth_set_state(ETH_STATE_GOT_IP, "got ip");
     ESP_LOGI(TAG, "Got IP: %s, gw " IPSTR, s_eth.ip_str, IP2STR(&ip->gw));
+
+    /* serial terminal over the wire: http://<ip>/log (idempotent) */
+    log_server_start();
 }
 
 esp_err_t app_eth_start(void)

@@ -1,6 +1,6 @@
 set(srcs "main.c" "app_lcd.c" "app_overlay.c"
           "camos/ui.c" "camos/touch.c"
-          "net/app_eth.c"
+          "net/app_eth.c" "net/log_server.c"
           "browser/web_client.c" "browser/html_text.c" "browser/browser.c"
           "media/media_audio.c" "media/media_player.c" "media/sdcard.c")
 
@@ -22,6 +22,7 @@ idf_component_register(SRCS "${srcs}"
                            esp_netif
                            esp_event
                            esp_http_client
+                           esp_http_server
                            esp-tls
                            heap
                            log

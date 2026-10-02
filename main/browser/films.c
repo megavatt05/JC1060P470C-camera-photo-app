@@ -329,6 +329,25 @@ static void pick_cb(const char *name, uint64_t size, void *ctx)
 
 films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz)
 {
+    /* tiny resolve cache: re-tapping the same film must not re-hit the
+     * (sometimes flaky) archive.org frontend, and after the frontend
+     * browned out mid-session the cached node URL still plays */
+    typedef struct { char ident[FILM_IDENT_MAX]; char url[224]; } res_cache_t;
+    static res_cache_t cache[8];
+    static int cache_n;
+    for (int i = 0; i < cache_n; i++) {
+        if (strcmp(cache[i].ident, ident) == 0) {
+            if (i != 0) {
+                res_cache_t t = cache[i];
+                memmove(&cache[1], &cache[0], sizeof(res_cache_t) * i);
+                cache[0] = t;
+            }
+            strlcpy(url, cache[0].url, urlsz);
+            ESP_LOGI(TAG, "resolve %s: cached %s", ident, url);
+            return FILMS_PLAY_OK;
+        }
+    }
+
     char meta_url[FILM_IDENT_MAX + 40];
     snprintf(meta_url, sizeof(meta_url), "https://archive.org/metadata/%s", ident);
 
@@ -342,16 +361,46 @@ films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz)
 
     pick_ctx_t pick = { .best = "", .best_size = 0, .have_512 = false };
     metadata_scan_files(body, pick_cb, &pick);
+
+    /* the files live on a cluster node named right in the metadata:
+     * "server":"ia801504.us.archive.org", "dir":"/29/items/<id>".
+     * A DIRECT node URL skips the archive.org/download redirect frontend,
+     * which brownouts far more often than the nodes themselves. */
+    char server[64] = "", dir[96] = "";
+    json_str_after(body, "server", server, sizeof(server));
+    json_str_after(body, "dir", dir, sizeof(dir));
     free(body);
 
     if (pick.best[0] == '\0') {
         return FILMS_ERR_NO_MP4;
     }
-    char enc[160];
+    char enc[320];
     web_url_encode(pick.best, enc, sizeof(enc));
-    snprintf(url, urlsz, "https://archive.org/download/%s/%s", ident, enc);
-    ESP_LOGI(TAG, "resolved %s -> %s (%" PRIu64 " bytes)", ident, pick.best,
-             pick.best_size);
+
+    bool have_node = server[0] != '\0' && dir[0] == '/';
+    if (have_node &&
+        snprintf(url, urlsz, "https://%s%s/%s", server, dir, enc) >= (int)urlsz) {
+        have_node = false;      /* truncated - fall through to /download */
+    }
+    if (!have_node &&
+        snprintf(url, urlsz, "https://archive.org/download/%s/%s",
+                 ident, enc) >= (int)urlsz) {
+        ESP_LOGW(TAG, "%s: play URL does not fit %u bytes", ident,
+                 (unsigned)urlsz);
+        return FILMS_ERR_NO_MP4;
+    }
+
+    for (int i = cache_n - 1; i > 0; i--) {
+        cache[i] = cache[i - 1];
+    }
+    if (cache_n < (int)(sizeof(cache) / sizeof(cache[0]))) {
+        cache_n++;
+    }
+    strlcpy(cache[0].ident, ident, sizeof(cache[0].ident));
+    strlcpy(cache[0].url, url, sizeof(cache[0].url));
+
+    ESP_LOGI(TAG, "resolved %s -> %s (%" PRIu64 " bytes, %s)", ident, pick.best,
+             pick.best_size, have_node ? "node" : "download");
     return FILMS_PLAY_OK;
 }
 
@@ -380,8 +429,33 @@ static inline uint32_t box_type(const uint8_t *p)
     return be32(p + 4);
 }
 
+/* Short loggable form: skip scheme, keep host + last 44 chars of path */
+static const char *url_short(const char *url)
+{
+    static char shortbuf[64];
+    const char *p = strstr(url, "://");
+    p = (p != NULL) ? p + 3 : url;
+    size_t len = strlen(p);
+    if (len <= sizeof(shortbuf) - 1) {
+        snprintf(shortbuf, sizeof(shortbuf), "%s", p);
+    } else {
+        snprintf(shortbuf, sizeof(shortbuf), "...%s", p + len - 44);
+    }
+    return shortbuf;
+}
+
+/* last HTTP status seen by the probe (0 = no answer), for the log/UI */
+static int s_probe_last_status;
+
+int films_probe_last_status(void)
+{
+    return s_probe_last_status;
+}
+
 /* Range-read len bytes at offset; returns bytes read or -1.
- * *strict_range is set false when the server answered 200 (ignored Range). */
+ * *strict_range is set false when the server answered 200 (ignored Range).
+ * Every failure is logged with the reason - the serial log must show WHY
+ * a film was rejected without a PC attached. */
 static int range_read(const char *url, uint64_t offset,
                       uint8_t *buf, size_t len, bool *strict_range)
 {
@@ -389,13 +463,14 @@ static int range_read(const char *url, uint64_t offset,
         .url = url,
         .buffer_size = 4096,
         .buffer_size_tx = 2048,
-        .timeout_ms = 12000,
+        .timeout_ms = 20000,
         .max_redirection_count = 10,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = false,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == NULL) {
+        ESP_LOGW(TAG, "range %s: client init failed", url_short(url));
         return -1;
     }
     char rh[40];
@@ -405,15 +480,19 @@ static int range_read(const char *url, uint64_t offset,
     esp_http_client_set_header(c, "Accept-Encoding", "identity");
 
     int got = -1;
-    if (esp_http_client_open(c, 0) == ESP_OK) {
-        int status = esp_http_client_fetch_headers(c);
-        (void)status;
+    esp_err_t open_err = esp_http_client_open(c, 0);
+    if (open_err == ESP_OK) {
+        (void)esp_http_client_fetch_headers(c);
         int code = esp_http_client_get_status_code(c);
+        s_probe_last_status = code;
         bool usable = (code == 206) || (code == 200 && offset == 0);
         if (strict_range != NULL && code == 200) {
             *strict_range = false;
         }
-        if (usable) {
+        if (!usable) {
+            ESP_LOGW(TAG, "range %s -> HTTP %d (need 206/200)",
+                     url_short(url), code);
+        } else {
             got = 0;
             while ((size_t)got < len) {
                 int n = esp_http_client_read(c, (char *)buf + got,
@@ -423,8 +502,14 @@ static int range_read(const char *url, uint64_t offset,
                 }
                 got += n;
             }
+            ESP_LOGI(TAG, "range %s -> HTTP %d, %d bytes",
+                     url_short(url), code, got);
         }
         esp_http_client_close(c);
+    } else {
+        s_probe_last_status = 0;
+        ESP_LOGW(TAG, "range %s: open failed: %s (DNS/TLS/сеть?)",
+                 url_short(url), esp_err_to_name(open_err));
     }
     esp_http_client_cleanup(c);
     return got;

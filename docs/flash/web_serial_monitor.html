@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Терминал COM — cambrowser (ESP32-P4)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(160deg, #0b1220 0%, #101b33 55%, #0b1220 100%);
+    color: #e8eefc; font-family: "Segoe UI", Roboto, Arial, sans-serif; padding: 16px;
+  }
+  .card {
+    width: 100%; max-width: 980px; background: #131f38; border: 1px solid #24365e;
+    border-radius: 18px; padding: 22px 24px; box-shadow: 0 18px 50px rgba(0,0,0,.45);
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #9db1d9; font-size: 13.5px; margin: 0 0 16px; line-height: 1.5; }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  button {
+    padding: 11px 18px; font-size: 15px; font-weight: 700; cursor: pointer;
+    color: #071224; background: linear-gradient(90deg,#57d0ff,#3f8cff);
+    border: 0; border-radius: 12px; transition: filter .15s ease;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.ghost { background: #22335c; color: #cfe0ff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .pill { font-size: 12.5px; color: #8fa2c9; margin-left: auto; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:#3a4a75; margin-right:6px; vertical-align: 1px;}
+  .dot.on { background: #35d07f; }
+  #term {
+    height: 62vh; overflow-y: auto; background: #0a1020; border: 1px solid #1d2c50;
+    border-radius: 12px; padding: 12px 14px; font: 12.5px/1.5 "Cascadia Mono", Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all; color: #b9cbe8;
+  }
+  .warn {
+    display:none; background:#3a1f22; border:1px solid #7c3a40; color:#ffd9dc;
+    padding: 12px 14px; border-radius: 10px; font-size: 13.5px; line-height: 1.55; margin: 12px 0;
+  }
+  .hint { margin-top: 14px; font-size: 12.5px; color: #8fa2c9; line-height: 1.6; }
+  .hint b { color:#cfe0ff; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Терминал COM — cambrowser</h1>
+  <p class="sub">Живой просмотр журнала платы через Web Serial (как монитор порта в Arduino IDE).
+  Логи копируются одной кнопкой — пришлите их ассистенту для анализа.</p>
+
+  <div class="bar">
+    <button id="conn">ПОДКЛЮЧИТЬ (COM10)</button>
+    <button id="pause" class="ghost" disabled>Пауза</button>
+    <button id="copy" class="ghost" disabled>Копировать всё</button>
+    <button id="save" class="ghost" disabled>Сохранить .log</button>
+    <button id="clear" class="ghost" disabled>Очистить</button>
+    <span class="pill"><span class="dot" id="dot"></span><span id="st">отключено</span></span>
+  </div>
+
+  <div class="warn" id="noser">
+    Этот браузер не поддерживает Web Serial. Откройте файл в <b>Google Chrome</b> или
+    <b>Microsoft Edge</b> на ПК. Firefox и мобильные браузеры не подходят.
+  </div>
+
+  <div id="term"></div>
+
+  <div class="hint">
+    Скорость 115200 8N1 (прошивка использует стандартный вывод IDF). Плата держит порт,
+    пока открыта эта страница; <b>если плата уже занята другим приложением — закройте его</b>.
+    Перед прошивкой терминал нужно отключить (кнопка «Отключить» появляется вместо «Подключить»).
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const term = $("term");
+  let port = null, reader = null, keepReading = false;
+  let paused = false;
+  const enc = new TextDecoder();
+
+  function status(s, on) {
+    $("st").textContent = s;
+    $("dot").className = "dot" + (on ? " on" : "");
+  }
+  function setBtns(connected) {
+    $("conn").textContent = connected ? "ОТКЛЮЧИТЬ" : "ПОДКЛЮЧИТЬ (COM10)";
+    for (const id of ["pause", "copy", "save", "clear"]) $(id).disabled = !connected;
+  }
+  function push(s) {
+    if (!paused) {
+      const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 40;
+      if (s) term.textContent += s;
+      if (term.textContent.length > 400000) term.textContent = term.textContent.slice(-300000);
+      if (atBottom) term.scrollTop = term.scrollHeight;
+    }
+  }
+
+  async function readLoop() {
+    while (port && keepReading && port.readable) {
+      reader = port.readable.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (value) push(enc.decode(value, { stream: true }));
+          if (done) break;
+        }
+      } catch (e) {
+        push("\r\n[порт: " + (e.message || e) + "]\r\n");
+      } finally {
+        reader.releaseLock();
+        reader = null;
+        if (!keepReading) break;
+        await new Promise(r => setTimeout(r, 400));   /* auto-reconnect */
+      }
+    }
+  }
+
+  $("conn").onclick = async () => {
+    if (port && keepReading) {                 /* disconnect */
+      keepReading = false;
+      try { if (reader) await reader.cancel(); } catch (e) {}
+      try { await port.close(); } catch (e) {}
+      port = null; setBtns(false); status("отключено", false);
+      return;
+    }
+    if (!("serial" in navigator)) { $("noser").style.display = "block"; return; }
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200, dataBits: 8, stopBits: 1, parity: "none",
+                        flowControl: "none", bufferSize: 8192 });
+      keepReading = true; setBtns(true); status("COM-порт открыт, 115200", true);
+      push("\r\n[подключено " + new Date().toLocaleTimeString() + "]\r\n");
+      readLoop();
+    } catch (e) {
+      if (e.name !== "NotFoundError") status("ошибка: " + (e.message || e), false);
+    }
+  };
+  $("pause").onclick = () => {
+    paused = !paused;
+    $("pause").textContent = paused ? "Продолжить" : "Пауза";
+  };
+  $("copy").onclick = async () => {
+    await navigator.clipboard.writeText(term.textContent);
+    $("copy").textContent = "Скопировано!";
+    setTimeout(() => $("copy").textContent = "Копировать всё", 1200);
+  };
+  $("save").onclick = () => {
+    const blob = new Blob([term.textContent], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "cambrowser_terminal.log";
+    a.click();
+  };
+  $("clear").onclick = () => { term.textContent = ""; };
+  if (!("serial" in navigator)) $("noser").style.display = "block";
+</script>
+</body>
+</html>

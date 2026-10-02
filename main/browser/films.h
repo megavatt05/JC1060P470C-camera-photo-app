@@ -11,8 +11,11 @@
  * MP4 headers and walks the boxes down to avcC to check the H.264 profile:
  * the SW decoder (tinyh264) only accepts Constrained/Baseline (profile 66).
  * Main/High streams are rejected here with a readable reason instead of a
- * decoder error mid-playback. The canonical archive.org/download/... URL is
- * given to the player as-is: esp_gmf_io_http follows 301/302 itself.
+ * decoder error mid-playback. The play URL is the DIRECT cluster-node link
+ * (https://<server><dir>/<file>) taken from the metadata - the node serves
+ * Range requests itself and stays up when the archive.org/download
+ * redirect frontend brownouts. Every probe failure is logged with its
+ * HTTP status / esp_err so the serial log shows the real cause.
  */
 
 #ifndef FILMS_H
@@ -62,11 +65,14 @@ esp_err_t films_search(const char *query, film_item_t *items, int max_items,
                        int *out_n);
 
 /**
- * @brief Pick the best mp4 derivative of an item and build its URL.
+ * @brief Pick the best mp4 derivative of an item and build its play URL.
  *
  * Prefers the classic "_512kb.mp4" derivative, else the smallest .mp4.
- * The returned URL is the canonical https://archive.org/download/<id>/<file>
- * - the player's HTTP element follows archive.org's redirect to the node.
+ * Returns the direct node URL from the metadata (server+dir fields) so the
+ * player and the probe skip the flaky archive.org/download redirect;
+ * falls back to the canonical download URL when the fields are missing.
+ * Results are cached (8 entries) - re-tapping a film never re-hits the
+ * metadata frontend.
  */
 films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz);
 
@@ -80,6 +86,9 @@ films_play_err_t films_resolve(const char *ident, char *url, size_t urlsz);
  * @param[out] out_h  decoded video height (0 if unknown)
  */
 films_play_err_t films_probe_url(const char *url, uint16_t *out_w, uint16_t *out_h);
+
+/** @brief HTTP status of the last probe request (0 = transport failure). */
+int films_probe_last_status(void);
 
 /** @brief Russian one-liner for a films_play_err_t (for the status line) */
 const char *films_err_str(films_play_err_t e);
