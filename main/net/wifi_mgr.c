@@ -136,6 +136,11 @@ static void on_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
         s.state = WIFI_MGR_CONNECTED;
         set_status("wifi: есть IP");
         ESP_LOGI(TAG, "STA IP: %s", s.ip);
+        /* Иначе при eth+wifi TLS/DNS часто уходят не туда и handshake рвётся (-0x50) */
+        if (s.sta_netif) {
+            esp_netif_set_default_netif(s.sta_netif);
+            ESP_LOGI(TAG, "default netif = STA (wifi)");
+        }
         if (s.eg) {
             xEventGroupSetBits(s.eg, CONNECT_BITS);
         }
