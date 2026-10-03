@@ -28,38 +28,51 @@ menu "CamBrowser (Ethernet Browser on LCD)"
     config EB_ETH_MDC_GPIO
         int "IP101 SMI MDC GPIO"
         default 31
-        help
-            Fixed by the board schematic (JP1 header, IP101 pin 22).
 
     config EB_ETH_MDIO_GPIO
         int "IP101 SMI MDIO GPIO"
         default 52
-        help
-            Fixed by the board schematic (JP1 header, IP101 pin 23).
 
     config EB_ETH_RMII_CLK_GPIO
         int "RMII REF_CLK GPIO (50 MHz input from the PHY)"
         default 50
-        help
-            The IP101 generates 50 MHz from its own 25 MHz crystal and
-            feeds the ESP32-P4 EMAC on this pin, so the EMAC must run in
-            EMAC_CLK_EXT_IN mode (hardcoded in app_eth.c).
 
     config EB_ETH_RST_GPIO
         int "IP101 reset GPIO (active low, -1 = none)"
         default 51
-        help
-            PHY_RSTN of the board; IP101 pin 32. app_eth.c pulses it low
-            before the first SMI transaction so the chip-ID check during
-            esp_eth_driver_install() cannot fail on a PHY held in reset.
 
     config EB_ETH_PHY_ADDR
         int "IP101 SMI address"
         default 1
         range 0 31
+
+    config EB_ETH_ENABLE
+        bool "Enable Ethernet (IP101 / internal EMAC)"
+        default y
         help
-            The board pulls PHY_AD0 high, so the PHY answers at SMI
-            address 1 (verified on the schematic).
+            Wired Ethernet on JC1060P470C (IP101 RMII). Can run together with Wi-Fi.
+
+    config EB_WIFI_ENABLE
+        bool "Enable Wi-Fi via ESP32-C6 (esp_hosted)"
+        default n
+        help
+            ESP32-P4 has no radio. Wi-Fi 6 is provided by the on-board ESP32-C6
+            over SDIO (esp_hosted + esp_wifi_remote). Set SSID/password below.
+            Note: microSD may share SDIO resources — prefer Ethernet+SD or Wi-Fi without SD.
+
+    config EB_WIFI_SSID
+        string "Wi-Fi SSID"
+        depends on EB_WIFI_ENABLE
+        default "myssid"
+        help
+            2.4 GHz network name (C6 is 2.4 GHz only).
+
+    config EB_WIFI_PASSWORD
+        string "Wi-Fi password"
+        depends on EB_WIFI_ENABLE
+        default "mypassword"
+        help
+            WPA2-PSK password.
 
     config EB_TOUCH_I2C_PORT
         int "Touch I2C port"
@@ -68,37 +81,18 @@ menu "CamBrowser (Ethernet Browser on LCD)"
     config EB_TOUCH_I2C_SCL
         int "Touch I2C SCL GPIO"
         default 8
-        help
-            The touch controller of the board is not documented; the
-            driver probes GT911 (0x5D/0x14), FT5x06 (0x38) and CST816
-            (0x15) on this bus. The default (GPIO8) is the former camera
-            SCCB SCL - on JC1060P470-family boards the touch controller
-            usually shares that I2C bus with the (removed) sensor.
 
     config EB_TOUCH_I2C_SDA
         int "Touch I2C SDA GPIO"
         default 7
-        help
-            Default GPIO7 = former camera SCCB SDA (same shared bus).
 
     config EB_TOUCH_RST_GPIO
         int "Touch controller reset GPIO (-1 = not wired)"
         default 5
-        help
-            Active-low reset of the touch controller. On the JC1060P470C
-            the GT911 RST is wired to GPIO5 (board docs). Without a reset
-            pulse a GT911 held in reset never ACKs on I2C and every probe
-            fails. Set to -1 if the reset line is not wired on your board.
 
     config EB_TOUCH_INT_GPIO
         int "Touch INT GPIO (GT911 address select, -1 = floating)"
         default -1
-        help
-            At reset release the GT911 latches its I2C address from the
-            INT pin level: low -> 0x5D, high/floating -> 0x14. When wired,
-            the probe drives it low for a deterministic address, then
-            releases it back to input. -1 = leave floating (both 0x5D and
-            0x14 are probed anyway).
 
     config EB_TOUCH_SWAP_XY
         bool "Touch: swap X/Y"
@@ -115,10 +109,6 @@ menu "CamBrowser (Ethernet Browser on LCD)"
     choice EB_SEARCH_ENGINE
         prompt "Search engine"
         default EB_ENGINE_DUCKDUCKGO
-        help
-            DuckDuckGo HTML endpoint has a stable markup and no consent
-            wall. Google markup changes often and may serve captcha to
-            datacenter IPs; it is best-effort.
 
         config EB_ENGINE_DUCKDUCKGO
             bool "DuckDuckGo (html endpoint)"
@@ -133,16 +123,9 @@ menu "CamBrowser (Ethernet Browser on LCD)"
         range 64 1024
 
     menu "Audio / Media (radio and video player)"
-        # Pin defaults are the JC1060P470C board wiring (verified against
-        # working ESPHome/Espressif configs for this exact board):
-        # ES8311 codec on the touch I2C bus (SDA 7 / SCL 8), I2S data pins
-        # 9/10/12/13, NS4150-class power amplifier enable on GPIO11.
         config EB_MEDIA_ENABLE
             bool "Enable radio and video player (media subsystem)"
             default y
-            help
-              Compiles main/media/ (esp_player + ES8311 audio out). Disabling
-              it builds the plain browser without the media stack.
 
         config EB_AUDIO_I2S_PORT
             int "I2S port for the audio output"
@@ -167,9 +150,6 @@ menu "CamBrowser (Ethernet Browser on LCD)"
         config EB_AUDIO_PA_GPIO
             int "Speaker power amplifier enable GPIO (-1 = always on)"
             default 11
-            help
-              NS4150-class amplifier enable line of the board. Driven to the
-              active level while audio is open.
 
         config EB_AUDIO_PA_ACTIVE_HIGH
             bool "Speaker amplifier enable is active high"
@@ -178,20 +158,10 @@ menu "CamBrowser (Ethernet Browser on LCD)"
         config EB_AUDIO_CODEC_ADDR
             hex "ES8311 I2C address (8-bit write address)"
             default 0x30
-            help
-              ES8311 at ADDR pin low answers at 7-bit 0x18, which is 0x30
-              in the 8-bit write convention used by esp_codec_dev.
 
-        # SD card wiring of the same board (Guition JC-ESP32P4-M3 module):
-        # SDMMC slot 0 dedicated pins, card IO rail from the on-chip LDO
-        # channel 4. Confirmed against independent board configs.
         config EB_SD_ENABLE
             bool "Enable SD card (media files from microSD)"
             default y
-            help
-              Mounts the microSD card on demand (media file screen) and
-              lets radio/video play files from it. Card must be FAT32
-              (exFAT is not supported by FatFS).
 
         config EB_SD_MOUNT
             string "SD mount point"
@@ -237,7 +207,7 @@ menu "Example Boards Types"
 
     choice
         prompt "Choose the Boards Types"
-        default BOARD_TYPE_JC4880P443
+        default BOARD_TYPE_JC1060P470
             config BOARD_TYPE_JC4880P443
                 bool "JC4880P4433"
 
