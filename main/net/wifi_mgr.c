@@ -105,20 +105,34 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
         s.ip[0] = '\0';
-        if (s.state == WIFI_MGR_CONNECTING && s.retry < 10) {
+        int reason = 0;
+        if (data) {
+            wifi_event_sta_disconnected_t *d = data;
+            reason = d->reason;
+            ESP_LOGW(TAG, "disconnect ssid="%s" reason=%d rssi=%d",
+                     (const char *)d->ssid, reason, (int)d->rssi);
+        }
+        /* 201=NO_AP 202=AUTH_FAIL 203=ASSOC_FAIL 15=4WAY_HANDSHAKE_TIMEOUT */
+        if (s.state == WIFI_MGR_CONNECTING && s.retry < 8) {
             s.retry++;
-            set_status("wifi: переподключение...");
+            char buf[40];
+            snprintf(buf, sizeof(buf), "wifi: retry %d (r=%d)", s.retry, reason);
+            set_status(buf);
             esp_wifi_connect();
-        } else if (s.state == WIFI_MGR_CONNECTING) {
+        } else if (s.state == WIFI_MGR_CONNECTING || s.state == WIFI_MGR_CONNECTED) {
             s.state = WIFI_MGR_FAIL;
-            set_status("wifi: нет связи");
+            if (reason == 202 || reason == 15) {
+                set_status("wifi: неверный пароль?");
+            } else if (reason == 201) {
+                set_status("wifi: сеть не найдена");
+            } else if (reason == 203) {
+                set_status("wifi: assoc fail (203)");
+            } else {
+                set_status("wifi: нет связи");
+            }
             if (s.eg) {
                 xEventGroupSetBits(s.eg, FAIL_BITS);
             }
-        } else if (s.state == WIFI_MGR_CONNECTED) {
-            s.state = WIFI_MGR_CONNECTING;
-            set_status("wifi: обрыв, reconnect");
-            esp_wifi_connect();
         }
     } else if (id == WIFI_EVENT_AP_START) {
         set_status("портал: 192.168.4.1:8080");
@@ -214,10 +228,14 @@ esp_err_t wifi_mgr_init(void)
         strcmp(CONFIG_EB_WIFI_SSID, "myssid") != 0) {
         return wifi_mgr_connect(CONFIG_EB_WIFI_SSID, CONFIG_EB_WIFI_PASSWORD);
     }
+    /* Сброс «хвоста» из NVS стека esp_wifi — иначе лезет к старой сети (ufanet30) */
+    wifi_config_t empty = { 0 };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &empty));
     ESP_ERROR_CHECK(esp_wifi_start());
     s.state = WIFI_MGR_IDLE;
     set_status("wifi: нет сохранённой сети");
+    ESP_LOGI(TAG, "STA idle — откройте экран Wi-Fi → ПОРТАЛ или СКАН");
     return ESP_OK;
 #endif
 }
