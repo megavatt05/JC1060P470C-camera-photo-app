@@ -109,7 +109,7 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (data) {
             wifi_event_sta_disconnected_t *d = data;
             reason = d->reason;
-            ESP_LOGW(TAG, "disconnect ssid="%s" reason=%d rssi=%d",
+            ESP_LOGW(TAG, "disconnect ssid=%s reason=%d rssi=%d",
                      (const char *)d->ssid, reason, (int)d->rssi);
         }
         /* 201=NO_AP 202=AUTH_FAIL 203=ASSOC_FAIL 15=4WAY_HANDSHAKE_TIMEOUT */
