@@ -54,7 +54,7 @@ menu "CamBrowser (Ethernet Browser on LCD)"
 
     config EB_WIFI_ENABLE
         bool "Enable Wi-Fi via ESP32-C6 (esp_hosted)"
-        default n
+        default y
         help
             ESP32-P4 has no radio. Wi-Fi 6 is provided by the on-board ESP32-C6
             over SDIO (esp_hosted + esp_wifi_remote). Set SSID/password below.
