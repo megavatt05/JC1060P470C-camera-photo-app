@@ -1,13 +1,13 @@
 /*
  * SPDX-License-Identifier: CC0-1.0
  *
- * CamBrowser network bring-up API (IP101 PHY on the ESP32-P4 internal
- * EMAC / RMII + DHCP).
+ * Ethernet (IP101 на внутреннем EMAC / RMII) + DHCP для CamBrowser.
  */
 
 #ifndef APP_ETH_H
 #define APP_ETH_H
 
+#include "esp_err.h"
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -15,32 +15,28 @@ extern "C" {
 #endif
 
 typedef enum {
-    APP_ETH_DOWN = 0,       /* driver not started or cable detached */
-    APP_ETH_LINK_UP,        /* PHY link detected, waiting for DHCP  */
-    APP_ETH_GOT_IP,         /* DHCP done, network ready             */
+    APP_ETH_DOWN = 0,       /* драйвер не запущен или кабель отключён */
+    APP_ETH_LINK_UP,        /* link PHY есть, ждём DHCP */
+    APP_ETH_GOT_IP,         /* DHCP готов, сеть доступна */
 } app_eth_state_t;
 
 /**
- * @brief Initialize the internal EMAC + IP101 PHY, netif and start the
- *        driver + DHCP.
+ * @brief Инициализация EMAC + IP101 PHY, netif, старт драйвера и DHCP.
  *
- * Safe to call once; subsequent calls are no-ops returning ESP_OK.
- * All pins/parameters come from Kconfig (EB_ETH_*): MDC 31, MDIO 52,
- * RMII REF_CLK input 50, PHY reset 51, PHY SMI address 1.
+ * Повторный вызов — no-op, возвращает ESP_OK.
+ * Пины из Kconfig (EB_ETH_*): MDC 31, MDIO 52, REF_CLK in 50, RST 51, addr 1.
  *
- * @return ESP_OK on success
+ * @return ESP_OK при успехе
  */
 esp_err_t app_eth_start(void);
 
-/** @brief True once an IP address was obtained (browser may go online) */
+/** @brief true после получения IP (браузер может выходить в сеть) */
 bool app_eth_ready(void);
 
-/** @brief String form of the current IPv4 address ("192.168.1.42"),
- *         empty until APP_ETH_GOT_IP */
+/** @brief Текущий IPv4 ("192.168.1.42"), пустая строка до APP_ETH_GOT_IP */
 const char *app_eth_ip_str(void);
 
-/** @brief Short human status for the status bar ("cable detached",
- *         "link up, dhcp...", "got ip", "starting...") */
+/** @brief Краткий статус для статус-бара */
 const char *app_eth_status_str(void);
 
 app_eth_state_t app_eth_state(void);
