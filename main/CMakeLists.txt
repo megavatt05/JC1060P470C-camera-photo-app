@@ -1,6 +1,6 @@
 set(srcs "main.c" "app_lcd.c" "app_overlay.c"
           "camos/ui.c" "camos/touch.c"
-          "net/app_eth.c" "net/log_server.c"
+          "net/app_eth.c" "net/app_wifi.c" "net/app_net.c" "net/log_server.c"
           "browser/web_client.c" "browser/html_text.c" "browser/browser.c"
           "media/media_audio.c" "media/media_player.c" "media/pstats.c"
           "media/sdcard.c")
@@ -17,6 +17,8 @@ idf_component_register(SRCS "${srcs}"
                            esp_lcd
                            esp_system
                            lwip
+                           nvs_flash
+                           esp_wifi
                            esp_driver_gpio
                            esp_driver_ledc
                            esp_driver_i2c

@@ -2,17 +2,6 @@
  * SPDX-License-Identifier: CC0-1.0
  *
  * CamBrowser log server: the last ~20 KB of ESP_LOG output over HTTP.
- *
- * A tiny esp_log vprintf hook appends every formatted log line to a RAM
- * ring buffer (chained to the previous sink, so the UART keeps printing
- * as before). Once the board has an IP, an esp_http_server serves the
- * ring at:
- *
- *     http://<board-ip>/log        text/plain, oldest line first
- *
- * This gives terminal visibility without a USB cable: open the URL from
- * any PC/phone on the same LAN and read/copy the log (the exact data the
- * serial monitor would show).
  */
 
 #include <string.h>
@@ -21,7 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
-#include "net/app_eth.h"
+#include "net/app_net.h"
 #include "net/log_server.h"
 
 static const char *TAG = "log_srv";
@@ -32,9 +21,9 @@ static const char *TAG = "log_srv";
 static struct {
     portMUX_TYPE lock;
     uint8_t      buf[LOG_RING_SIZE];
-    size_t       head;            /* write position            */
-    size_t       filled;          /* bytes valid (<= SIZE)     */
-    uint32_t     dropped;         /* lines lost to truncation  */
+    size_t       head;
+    size_t       filled;
+    uint32_t     dropped;
     vprintf_like_t prev_sink;
     bool         hooked;
 } s_ring = {
@@ -43,14 +32,13 @@ static struct {
 
 static void ring_put(const char *s, size_t n)
 {
-    /* called with the spinlock held */
     for (size_t i = 0; i < n; i++) {
         s_ring.buf[s_ring.head] = (uint8_t)s[i];
         s_ring.head = (s_ring.head + 1) % LOG_RING_SIZE;
         if (s_ring.filled < LOG_RING_SIZE) {
             s_ring.filled++;
         } else {
-            s_ring.dropped++;   /* one byte of the oldest line lost */
+            s_ring.dropped++;
         }
     }
 }
@@ -67,7 +55,6 @@ static int log_ring_vprintf(const char *format, va_list args)
         ring_put(line, (size_t)n);
         portEXIT_CRITICAL(&s_ring.lock);
     }
-    /* chain to the previous sink (UART console) */
     vprintf_like_t prev = s_ring.prev_sink;
     return (prev != NULL) ? prev(format, args) : n;
 }
@@ -101,11 +88,7 @@ static esp_err_t log_http_handler(httpd_req_t *req)
                 "[... старые строки вытеснены: %lu байт ...]\r\n",
                 (unsigned long)dropped);
     }
-    esp_err_t err = httpd_resp_send(req, snap, n + total);
-    if (err != ESP_OK) {
-        return err;
-    }
-    return ESP_OK;
+    return httpd_resp_send(req, snap, n + total);
 }
 
 static esp_err_t root_http_handler(httpd_req_t *req)
@@ -113,7 +96,7 @@ static esp_err_t root_http_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     char msg[128];
     snprintf(msg, sizeof(msg),
-             "CamBrowser log: http://%s/log\r\n", app_eth_ip_str());
+             "CamBrowser log: http://%s/log\r\n", app_net_ip_str());
     return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -147,6 +130,6 @@ esp_err_t log_server_start(void)
     httpd_register_uri_handler(server, &uri_root);
 
     started = true;
-    ESP_LOGI(TAG, "log server ready: http://%s/log", app_eth_ip_str());
+    ESP_LOGI(TAG, "log server ready: http://%s/log", app_net_ip_str());
     return ESP_OK;
 }
