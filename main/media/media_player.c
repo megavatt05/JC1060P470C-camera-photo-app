@@ -1,1 +1,698 @@
-PLACEHOLDER_WILL_FAIL
+/*
+ * SPDX-License-Identifier: CC0-1.0
+ *
+ * Медиаплеер CamBrowser поверх esp_player (esp-gmf).
+ * Архитектура — см. media_player.h.
+ */
+
+#include <string.h>
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "sdkconfig.h"
+#include "app_lcd.h"
+#include "media_lib_adapter.h"
+#include "esp_extractor_defaults.h"
+#include "esp_audio_dec_default.h"
+#include "esp_video_dec_default.h"
+#include "esp_gmf_pool.h"
+#include "esp_gmf_ch_cvt.h"
+#include "esp_gmf_bit_cvt.h"
+#include "esp_gmf_rate_cvt.h"
+#include "esp_gmf_alc.h"
+#include "esp_audio_render.h"
+#include "esp_video_render.h"
+#include "esp_video_render_backend.h"
+#if CONFIG_IDF_TARGET_ESP32P4
+#include "esp_gmf_video_ppa.h"
+#endif
+#include "esp_gmf_video_color_convert.h"
+#include "esp_player.h"
+#include "esp_player_advance.h"
+#include "esp_task_wdt.h"
+#include "freertos/idf_additions.h"
+#include "media/media_audio.h"
+#include "media/media_player.h"
+#include "media/pstats.h"
+
+static const char *TAG = "media_player";
+
+#define MEDIA_URL_MAX 256
+
+/* Колбэк записи esp_audio_render → кодек.
+ * Контракт (esp_audio_render_write_cb_t): 0 = успех, ненулевое = ошибка.
+ * Если вернуть число байт, рендер считает каждую успешную запись ошибкой
+ * («OUT port release error, ret:-1» из ESP_GMF_RATE_CVT) и рвёт поток
+ * на первом PCM-блоке. */
+static int audio_writer_cb(uint8_t *pcm, uint32_t len, void *ctx)
+{
+    (void)ctx;
+    return media_audio_write(pcm, (int)len) < 0 ? -1 : 0;
+}
+
+static struct {
+    bool           inited;              /* стек + аудио зарегистрированы */
+    volatile media_state_t state;
+    bool           mode_video;          /* последний старт — видео        */
+    volatile bool  video_active;        /* рендер владеет панелью         */
+    char           url[MEDIA_URL_MAX];
+
+    esp_player_handle_t player;
+
+    /* аудиорендер (общий для радио и видео) */
+    esp_gmf_pool_handle_t audio_pool;
+    esp_audio_render_handle_t audio_render;
+    esp_audio_render_stream_handle_t audio_stream;
+
+    /* видеорендер (только видео) */
+    esp_gmf_pool_handle_t video_pool;
+    esp_video_render_handle_t video_render;
+} s_mp;
+
+/* Телеметрия BUFFERING/BUFFERED с ограничением частоты логов.
+ * На потоках ~512x288 SW-декодер тормозит демуксер (полная видеоочередь —
+ * head-of-line blocking), поэтому вентиль ребуферизации хлопает
+ * enter/leave ~раз за grace (~4 Гц) при нормальном запасе аудио —
+ * сотни событий в минуту (раньше каждое в лог, E-24). pstats по-прежнему
+ * кормит СТОПЫ/БУФЕРИЗАЦИЯ на OSD; в UART — одна сводка раз в 10 с. */
+static uint32_t s_buf_n_enter, s_buf_n_leave;
+static int64_t s_buf_last_log_us = -10000000;
+
+static void player_buf_evt_log(bool enter)
+{
+    int64_t now = esp_timer_get_time();
+    if (enter) {
+        s_buf_n_enter++;
+    } else {
+        s_buf_n_leave++;
+    }
+    if (now - s_buf_last_log_us < 10000000) {
+        return;
+    }
+    s_buf_last_log_us = now;
+    if (enter) {
+        ESP_LOGI(TAG, "буферизация #%lu (готово #%lu; дальше не чаще 1 строки / 10 с)",
+                 (unsigned long)s_buf_n_enter, (unsigned long)s_buf_n_leave);
+    } else {
+        ESP_LOGI(TAG, "буфер готов #%lu (буферизация #%lu; дальше не чаще 1 строки / 10 с)",
+                 (unsigned long)s_buf_n_leave, (unsigned long)s_buf_n_enter);
+    }
+}
+
+static void player_buf_evt_reset(void)
+{
+    s_buf_n_enter = 0;
+    s_buf_n_leave = 0;
+    s_buf_last_log_us = -10000000;
+}
+
+static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
+{
+    (void)ctx;
+    pstats_player_event((int)msg->event_type);
+    switch (msg->event_type) {
+    case ESP_PLAYER_EVENT_PLAYED:
+        s_mp.state = MEDIA_STATE_PLAYING;
+        ESP_LOGI(TAG, "играет");
+        break;
+    case ESP_PLAYER_EVENT_PAUSED:
+        s_mp.state = MEDIA_STATE_PAUSED;
+        ESP_LOGI(TAG, "пауза");
+        break;
+    case ESP_PLAYER_EVENT_BUFFERING:
+        player_buf_evt_log(true);
+        break;
+    case ESP_PLAYER_EVENT_BUFFERED:
+        player_buf_evt_log(false);
+        break;
+    case ESP_PLAYER_EVENT_AUDIO_INFO_PARSED:
+        ESP_LOGI(TAG, "аудиодорожка разобрана");
+        break;
+    case ESP_PLAYER_EVENT_VIDEO_INFO_PARSED:
+        ESP_LOGI(TAG, "видеодорожка разобрана");
+        break;
+    case ESP_PLAYER_EVENT_FINISHED:
+        s_mp.state = MEDIA_STATE_FINISHED;
+        ESP_LOGI(TAG, "конец");
+        break;
+    case ESP_PLAYER_EVENT_STOPPED:
+        /* teardown делает media_stop(); idle только если плеер
+         * остановился сам (пути восстановления после ошибки) */
+        if (s_mp.state == MEDIA_STATE_PLAYING || s_mp.state == MEDIA_STATE_CONNECTING) {
+            s_mp.state = MEDIA_STATE_FINISHED;
+        }
+        ESP_LOGI(TAG, "остановлен");
+        break;
+    case ESP_PLAYER_EVENT_ERROR:
+        s_mp.state = MEDIA_STATE_ERROR;
+        if (msg->data != NULL) {
+            ESP_LOGE(TAG, "ошибка воспроизведения, source=%d",
+                     (int)*(esp_player_error_source_t *)msg->data);
+        } else {
+            ESP_LOGE(TAG, "ошибка воспроизведения");
+        }
+        break;
+    default:
+        break;
+    }
+    return ESP_PLAYER_ERR_OK;
+}
+
+static void destroy_audio_render(void)
+{
+    if (s_mp.audio_render != NULL) {
+        esp_audio_render_destroy(s_mp.audio_render);
+        s_mp.audio_render = NULL;
+        s_mp.audio_stream = NULL;
+    }
+    if (s_mp.audio_pool != NULL) {
+        esp_gmf_pool_deinit(s_mp.audio_pool);
+        s_mp.audio_pool = NULL;
+    }
+}
+
+static esp_err_t create_audio_render(void)
+{
+    if (s_mp.audio_render != NULL) {
+        return ESP_OK;      /* уже поднят */
+    }
+
+    esp_err_t err = media_audio_open();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* Пул GMF: конвертеры из любого формата декода в фиксированный
+     * кодек 48 кГц / 16 бит / стерео. */
+    if (esp_gmf_pool_init(&s_mp.audio_pool) != ESP_GMF_ERR_OK) {
+        return ESP_FAIL;
+    }
+    esp_gmf_element_handle_t el = NULL;
+
+    esp_ae_ch_cvt_cfg_t ch_cfg = DEFAULT_ESP_GMF_CH_CVT_CONFIG();
+    if (esp_gmf_ch_cvt_init(&ch_cfg, &el) == ESP_GMF_ERR_OK) {
+        esp_gmf_pool_register_element(s_mp.audio_pool, el, NULL);
+    }
+    esp_ae_bit_cvt_cfg_t bit_cfg = DEFAULT_ESP_GMF_BIT_CVT_CONFIG();
+    if (esp_gmf_bit_cvt_init(&bit_cfg, &el) == ESP_GMF_ERR_OK) {
+        esp_gmf_pool_register_element(s_mp.audio_pool, el, NULL);
+    }
+    esp_ae_rate_cvt_cfg_t rate_cfg = DEFAULT_ESP_GMF_RATE_CVT_CONFIG();
+    if (esp_gmf_rate_cvt_init(&rate_cfg, &el) == ESP_GMF_ERR_OK) {
+        esp_gmf_pool_register_element(s_mp.audio_pool, el, NULL);
+    }
+    esp_ae_alc_cfg_t alc_cfg = DEFAULT_ESP_GMF_ALC_CONFIG();
+    if (esp_gmf_alc_init(&alc_cfg, &el) == ESP_GMF_ERR_OK) {
+        esp_gmf_pool_register_element(s_mp.audio_pool, el, NULL);
+    }
+
+    esp_audio_render_cfg_t rcfg = {
+        .max_stream_num = 1,
+        .out_writer = audio_writer_cb,
+        .out_ctx = NULL,
+        .out_sample_info = {
+            .sample_rate = 48000,
+            .bits_per_sample = 16,
+            .channel = 2,
+        },
+        .pool = s_mp.audio_pool,
+        .process_period = 20,
+    };
+
+    if (esp_audio_render_create(&rcfg, &s_mp.audio_render) != ESP_AUDIO_RENDER_ERR_OK) {
+        ESP_LOGE(TAG, "esp_audio_render_create не удался");
+        destroy_audio_render();
+        return ESP_FAIL;
+    }
+    if (esp_audio_render_stream_get(s_mp.audio_render, ESP_AUDIO_RENDER_FIRST_STREAM,
+                                    &s_mp.audio_stream) != ESP_AUDIO_RENDER_ERR_OK) {
+        ESP_LOGE(TAG, "esp_audio_render_stream_get не удался");
+        destroy_audio_render();
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+/* --- обёртка backend видеорендера: OSD-статистика в каждый кадр -------
+ * Во время видео рендер владеет DPI frame buffer'ами — рисовать можно
+ * только в тот буфер, который backend сейчас выводит. Оборачиваем
+ * штатный LCD backend: в write_fb сначала учёт кадра (fps рендера и
+ * потока) и отрисовка блока pstats OSD, затем делегирование.
+ * pstats_osd_draw() — прямой blit, ~0.2 мс на кадр на ядре рендера. */
+static const esp_video_render_backend_ops_t *s_lcd_ops;
+static esp_video_render_backend_handle_t s_lcd_backend;
+static int s_osd_handle;    /* непрозрачный адрес — наш backend handle */
+
+static esp_video_render_err_t osd_init(void *cfg, int cfg_size,
+                                       esp_video_render_backend_handle_t *backend)
+{
+    esp_video_render_err_t r = s_lcd_ops->init(cfg, cfg_size, &s_lcd_backend);
+    if (r == ESP_VIDEO_RENDER_ERR_OK && backend != NULL) {
+        *backend = (esp_video_render_backend_handle_t)&s_osd_handle;
+    }
+    return r;
+}
+
+static bool osd_with_gram(esp_video_render_backend_handle_t backend)
+{
+    (void)backend;
+    return s_lcd_ops->with_gram(s_lcd_backend);
+}
+
+static esp_video_render_err_t osd_get_display_info(esp_video_render_backend_handle_t backend,
+                                                   esp_video_render_disp_info_t *info)
+{
+    (void)backend;
+    return s_lcd_ops->get_display_info(s_lcd_backend, info);
+}
+
+static esp_video_render_err_t osd_get_fb(esp_video_render_backend_handle_t backend,
+                                         esp_video_render_fb_t *fb)
+{
+    (void)backend;
+    return s_lcd_ops->get_fb(s_lcd_backend, fb);
+}
+
+static esp_video_render_err_t osd_lock_fb(esp_video_render_backend_handle_t backend,
+                                          esp_video_render_fb_t *fb, bool lock)
+{
+    (void)backend;
+    return s_lcd_ops->lock_fb(s_lcd_backend, fb, lock);
+}
+
+static esp_video_render_err_t osd_write_fb(esp_video_render_backend_handle_t backend,
+                                           esp_video_render_fb_t *fb,
+                                           const esp_video_render_rect_t *dirty_rect,
+                                           const esp_video_render_pos_t *pos)
+{
+    (void)backend;
+    if (fb != NULL && fb->data != NULL) {
+        pstats_note_video_frame(fb->info.fps);
+        if (fb->info.format == ESP_VIDEO_RENDER_FORMAT_RGB565 &&
+            fb->info.width == EXAMPLE_LCD_H_RES &&
+            fb->info.height == EXAMPLE_LCD_V_RES) {
+            pstats_osd_draw((uint16_t *)fb->data, fb->info.width, fb->info.height);
+        }
+    }
+    return s_lcd_ops->write_fb(s_lcd_backend, fb, dirty_rect, pos);
+}
+
+static esp_video_render_err_t osd_deinit(esp_video_render_backend_handle_t backend)
+{
+    (void)backend;
+    esp_video_render_backend_handle_t real = s_lcd_backend;
+    s_lcd_backend = NULL;
+    return s_lcd_ops->deinit(real);
+}
+
+static const esp_video_render_backend_ops_t s_osd_ops = {
+    .init              = osd_init,
+    .with_gram         = osd_with_gram,
+    .get_display_info  = osd_get_display_info,
+    .get_fb            = osd_get_fb,
+    .lock_fb           = osd_lock_fb,
+    .write_fb          = osd_write_fb,
+    .deinit            = osd_deinit,
+};
+
+static void destroy_video_render(void)
+{
+    pstats_osd_set(false);
+    esp_log_level_set("VIDEO_RENDER", (esp_log_level_t)CONFIG_LOG_DEFAULT_LEVEL);
+    if (s_mp.video_render != NULL) {
+        esp_video_render_destroy(s_mp.video_render);
+        s_mp.video_render = NULL;
+    }
+    if (s_mp.video_pool != NULL) {
+        esp_gmf_pool_deinit(s_mp.video_pool);
+        s_mp.video_pool = NULL;
+    }
+    /* LCD backend регистрирует .on_color_trans_done на нашей DPI-панели
+     * с собой в context и не снимает при close (проверено в
+     * esp_video_render 1.0.0 и 1.1.0). После esp_video_render_destroy()
+     * backend освобождён, но следующий app_lcd_flush() всё ещё вызывает
+     * устаревший колбэк (esp_lcd зовёт on_color_trans_done синхронно из
+     * dpi_panel_draw_bitmap_2d) → xSemaphoreGive по освобождённой памяти →
+     * «Guru Meditation Error: Core 1 panic'ed (Load access fault)» сразу
+     * после конца видео. Снимаем регистрацию — панель снова безопасна
+     * для отрисовки UI браузера. */
+    app_lcd_dpi_clear_callbacks();
+}
+
+static esp_err_t create_video_render(void)
+{
+    if (s_mp.video_render != NULL) {
+        return ESP_OK;
+    }
+
+    if (esp_gmf_pool_init(&s_mp.video_pool) != ESP_GMF_ERR_OK) {
+        return ESP_FAIL;
+    }
+    esp_gmf_element_handle_t el = NULL;
+#if CONFIG_IDF_TARGET_ESP32P4
+    /* PPA: аппаратный scale/blend/color-convert на P4 */
+    if (esp_gmf_video_ppa_init(NULL, &el) == ESP_GMF_ERR_OK) {
+        esp_gmf_pool_register_element(s_mp.video_pool, el, NULL);
+    }
+#endif
+    esp_imgfx_color_convert_cfg_t color_cfg = {
+        .color_space_std = ESP_IMGFX_COLOR_SPACE_STD_BT601,
+    };
+    if (esp_gmf_video_color_convert_init(&color_cfg, &el) == ESP_GMF_ERR_OK) {
+        esp_gmf_pool_register_element(s_mp.video_pool, el, NULL);
+    }
+
+    esp_video_render_cfg_t vcfg = {
+        .pool = s_mp.video_pool,
+        .fps = 30,
+    };
+    if (esp_video_render_create(&vcfg, &s_mp.video_render) != ESP_VIDEO_RENDER_ERR_OK) {
+        ESP_LOGE(TAG, "esp_video_render_create не удался");
+        destroy_video_render();
+        return ESP_FAIL;
+    }
+
+    /* LCD backend: свои DPI frame buffer'ы панели (2 × 1024×600 RGB565).
+     * Дальше до teardown панелью владеет рендер. */
+    esp_video_render_lcd_cfg_t lcd_cfg = {
+        .lcd_type = ESP_VIDEO_RENDER_LCD_TYPE_DPI,
+        .fb_num = 2,
+        .out_format = ESP_VIDEO_RENDER_FORMAT_RGB565,
+        .width = EXAMPLE_LCD_H_RES,
+        .height = EXAMPLE_LCD_V_RES,
+        .lcd_handle = app_lcd_get_panel(),
+        .io_handle = app_lcd_get_io(),
+    };
+    if (lcd_cfg.lcd_handle == NULL) {
+        ESP_LOGE(TAG, "panel handle == NULL");
+        destroy_video_render();
+        return ESP_FAIL;
+    }
+    s_lcd_ops = esp_video_render_get_lcd_backend();
+    if (s_lcd_ops == NULL) {
+        ESP_LOGE(TAG, "нет ops LCD backend");
+        destroy_video_render();
+        return ESP_FAIL;
+    }
+    esp_video_render_backend_cfg_t backend_cfg = {
+        .ops = &s_osd_ops,          /* обёртка lcd ops: OSD статистики */
+        .cfg = &lcd_cfg,
+        .cfg_size = sizeof(lcd_cfg),
+    };
+    if (esp_video_render_set_display(s_mp.video_render, &backend_cfg) != ESP_VIDEO_RENDER_ERR_OK) {
+        ESP_LOGE(TAG, "esp_video_render_set_display не удался");
+        destroy_video_render();
+        return ESP_FAIL;
+    }
+
+    /* esp_video_render пишет WARN на каждый «поздний» кадр
+     * («Write too slow reset rate control»), если поток медленнее realtime —
+     * сотни строк в минуту, нагрузка на ядро рендера и забитый /log.
+     * События буферизации и карточка busy уже несут эту информацию:
+     * на время воспроизведения глушим тег, на teardown возвращаем. */
+    esp_log_level_set("VIDEO_RENDER", ESP_LOG_ERROR);
+    return ESP_OK;
+}
+
+static void player_teardown(void)
+{
+    if (s_mp.player != NULL) {
+        /* NB: не вызываем esp_player_set_event_cb(NULL) — плеер отвергает
+         * это в PLAYING («Failed to set event cb. state: 2»), а колбэк
+         * трогает только static s_mp, поэтому безопасен до deinit. */
+        esp_player_stop(s_mp.player);
+        esp_player_deinit(s_mp.player);
+        s_mp.player = NULL;
+    }
+    destroy_audio_render();
+    destroy_video_render();
+    media_audio_close();
+    s_mp.video_active = false;
+}
+
+static esp_err_t player_start(const char *url, bool video)
+{
+    /* остановить и разобрать всё, что сейчас играет */
+    player_teardown();
+    s_mp.state = MEDIA_STATE_CONNECTING;
+    s_mp.mode_video = video;
+    strlcpy(s_mp.url, url, sizeof(s_mp.url));
+
+    esp_err_t err = create_audio_render();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "настройка аудиорендера не удалась");
+        goto fail;
+    }
+    if (video) {
+        err = create_video_render();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "настройка видеорендера не удалась");
+            goto fail;
+        }
+        /* рендер теперь владеет frame buffer'ами панели */
+        s_mp.video_active = true;
+    }
+
+    esp_player_config_t pcfg = ESP_PLAYER_CONFIG_DEFAULT();
+    pcfg.audio_render_hd = s_mp.audio_stream;
+    pcfg.video_render_hd = video ? s_mp.video_render : NULL;
+    if (esp_player_init(&pcfg, &s_mp.player) != ESP_PLAYER_ERR_OK) {
+        ESP_LOGE(TAG, "esp_player_init не удался");
+        goto fail;
+    }
+    esp_player_set_event_cb(s_mp.player, player_event_cb, NULL);
+
+    /* Встроенный demux pool для видео — 100 КБ (player_defaults_cfg.h).
+     * На типичном потоке archive.org он насыщается при ~140 мс буфера, а
+     * вентиль ребуферизации ждёт 300 мс → вентиль сдаётся и отключается
+     * («Demux pool saturated ... disabling the re-buffering gate»), дальше
+     * воспроизведение идёт «в голод» и каждый поздний кадр даёт
+     * «Write too slow» от видеорендера. Пул в PSRAM держит секунды потока,
+     * вентиль реально доходит до порога resume, сетевые рывки сглаживаются.
+     * Менять конфиг можно только в IDLE/STOPPED/FINISHED — сразу после
+     * init это как раз так.
+     *
+     * Сетевая подстройка: штатные пороги вентиля 400/200/300 мс — под
+     * быстрые линки. На реальных archive.org demux едва держит один цикл
+     * («saturated at 278 ms»), вентиль отключается. Нужен запас:
+     * demux pool + HTTP read-ahead + prebuffer (PSRAM 32 МБ).
+     *
+     * CDN archive.org рвёт длинные TLS (MBEDTLS -0x004C / ENOTCONN).
+     * Больше HTTP read-ahead + demux pool → реже starve при реконнекте.
+     * (Журнал: E-HTTP-TLS-RECONNECT, 2026-10-03.) */
+    esp_player_buffer_config_t bcfg = {
+        .extractor_pool_size = 4 * 1024 * 1024,
+        .http_read_buf_size  = 512 * 1024,
+        .prebuffer_resume_ms = 2000,
+        .rebuffer_enter_ms   = 500,
+        .rebuffer_resume_ms  = 1500,
+        .rebuffer_grace_ms   = 300,
+    };
+    if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {
+        ESP_LOGW(TAG, "переопределение buffer cfg не удалось, оставляем встроенные");
+    }
+    pstats_stream_reset();
+    player_buf_evt_reset();
+    pstats_osd_set(video);
+
+    /* По умолчанию esp_player сажает video_decoder на ядро 0 — CPU-тяжёлый
+     * SW H.264 (tinyh264) душит IDLE0 → срабатывания task watchdog и
+     * конкуренция со всем на ядре 0. Меняем: декод видео → ядро 1,
+     * видеорендер (SW color cvt + PPA + LCD flush) → ядро 0.
+     * Аудио — штатные defaults (decoder=1, render=0).
+     * Stack/prio как в player_defaults_cfg.h. */
+    esp_player_task_config_t tcfg = {
+        .extractor     = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .audio_decoder = { .stack = 5120, .prio = 5, .core = 1, .stack_in_ext = 0 },
+        .audio_render  = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .video_decoder = { .stack = 5120, .prio = 5, .core = 1, .stack_in_ext = 0 },
+        .video_render  = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+    };
+    esp_player_set_task_config(s_mp.player, &tcfg);
+
+    esp_player_data_src_t src = ESP_PLAYER_DATA_SRC(s_mp.url,
+                                       video ? ESP_PLAYER_MASK_AV : ESP_PLAYER_MASK_AUDIO);
+    if (esp_player_set_data_src(s_mp.player, &src) != ESP_PLAYER_ERR_OK ||
+        esp_player_run(s_mp.player) != ESP_PLAYER_ERR_OK) {
+        ESP_LOGE(TAG, "старт плеера не удался");
+        goto fail;
+    }
+
+    ESP_LOGI(TAG, "старт %s: %s", video ? "видео" : "радио", url);
+    return ESP_OK;
+
+fail:
+    player_teardown();
+    s_mp.url[0] = '\0';
+    s_mp.state = MEDIA_STATE_ERROR;
+    return ESP_FAIL;
+}
+
+bool media_query_play(uint64_t *pos_ms, uint64_t *dur_ms)
+{
+    if (s_mp.player == NULL) {
+        return false;
+    }
+    uint64_t pos = 0, dur = 0;
+    if (esp_player_get_play_time(s_mp.player, &pos) != ESP_PLAYER_ERR_OK) {
+        return false;
+    }
+    if (esp_player_get_duration(s_mp.player, &dur) != ESP_PLAYER_ERR_OK) {
+        dur = 0;
+    }
+    if (pos_ms != NULL) {
+        *pos_ms = pos;
+    }
+    if (dur_ms != NULL) {
+        *dur_ms = dur;
+    }
+    return true;
+}
+
+esp_err_t media_player_init(void)
+{
+    if (s_mp.inited) {
+        return ESP_OK;
+    }
+
+    /* адаптер памяти media + демуксеры/декодеры по умолчанию */
+    media_lib_add_default_adapter();
+    esp_extractor_register_default();
+    esp_audio_dec_register_default();
+    esp_video_dec_register_default();
+
+    esp_err_t err = media_audio_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "инит аудио платы не удался: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* Статистика воспроизведения: счётчик NIC rx + сэмплер 1 Гц (pstats.c) */
+    pstats_init();
+
+    /* Помощник формата esp_player угадывает контейнер по расширению URL;
+     * у радиопотоков его нет (.../ep128, icecast) → страшный лог
+     * «Invalid argument. url: ... format: 0x...», а пайплайн всё равно
+     * уходит в probing (player_stream.c игнорирует ошибку — на воспроизведение
+     * не влияет). Глушим тег: остальные его сообщения дублируют то, что
+     * мы и так показываем сами. */
+    esp_log_level_set("ESP_PLAYER_HELPER", ESP_LOG_NONE);
+    /* Шторм реконнектов CDN (archive.org) — не засоряем UART на каждый Open */
+    esp_log_level_set("ESP_GMF_HTTP", ESP_LOG_WARN);
+
+    /* SW H.264 декодер закономерно загружает своё ядро (1) на минуты
+     * на потоках уровня 360p; IDLE1 не бегает, task watchdog сыпет
+     * дампами регистров каждые ~5 с, хотя воспроизведение идёт.
+     * Следим только за idle CPU0 через esp_task_wdt_reconfigure():
+     * голод декода на ядре 1 виден в экранной статистике (CPU1 %, FPS),
+     * а не в watchdog-дампах. reconfigure() в отличие от голого
+     * esp_task_wdt_delete(idle1) ещё снимает idle-hook ядра 1; иначе
+     * hook продолжал кормить «неизвестный» task → «task not found» (E-23).
+     * Таймаут и поведение panic — как в Kconfig.
+     *
+     * IDF 6.0.3: CONFIG_ESP_TASK_WDT_PANIC — bool Kconfig. Если опция
+     * выключена (# CONFIG_ESP_TASK_WDT_PANIC is not set), макрос в
+     * sdkconfig.h НЕ определяется → undeclared. Берём через #ifdef.
+     * (Журнал: E-TWDT-PANIC, 2026-10-03.) */
+#if CONFIG_ESP_TASK_WDT_INIT
+    {
+        esp_task_wdt_config_t wcfg = {
+            .timeout_ms     = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000,
+            .idle_core_mask = (1 << 0), /* следим за CPU0, CPU1 снимаем */
+#ifdef CONFIG_ESP_TASK_WDT_PANIC
+            .trigger_panic  = true,
+#else
+            .trigger_panic  = false,
+#endif
+        };
+        esp_err_t werr = esp_task_wdt_reconfigure(&wcfg);
+        ESP_LOGI(TAG, "TWDT idle: только CPU0: %s", esp_err_to_name(werr));
+    }
+#endif
+
+    s_mp.inited = true;
+    return ESP_OK;
+}
+
+esp_err_t media_radio_start(const char *url)
+{
+    if (url == NULL || url[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = media_player_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    return player_start(url, false);
+}
+
+esp_err_t media_video_start(const char *url)
+{
+    if (url == NULL || url[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = media_player_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    return player_start(url, true);
+}
+
+void media_stop(void)
+{
+    player_teardown();
+    s_mp.state = MEDIA_STATE_IDLE;
+}
+
+void media_pause(void)
+{
+    if (s_mp.player != NULL && s_mp.state == MEDIA_STATE_PLAYING) {
+        esp_player_pause(s_mp.player);
+    }
+}
+
+void media_resume(void)
+{
+    if (s_mp.player != NULL && s_mp.state == MEDIA_STATE_PAUSED) {
+        esp_player_resume(s_mp.player);
+    }
+}
+
+media_state_t media_get_state(void)
+{
+    return s_mp.state;
+}
+
+const char *media_state_str(void)
+{
+    switch (s_mp.state) {
+    case MEDIA_STATE_CONNECTING: return "СОЕДИНЕНИЕ...";
+    case MEDIA_STATE_PLAYING:    return "ИГРАЕТ";
+    case MEDIA_STATE_PAUSED:     return "ПАУЗА";
+    case MEDIA_STATE_FINISHED:   return "КОНЕЦ";
+    case MEDIA_STATE_ERROR:      return "ОШИБКА";
+    default:                     return "СТОП";
+    }
+}
+
+bool media_video_active(void)
+{
+    return s_mp.video_active;
+}
+
+const char *media_get_url(void)
+{
+    return s_mp.url;
+}
+
+void media_set_volume(int vol)
+{
+    media_audio_set_volume(vol);
+}
+
+int media_get_volume(void)
+{
+    return media_audio_get_volume();
+}
