@@ -1,321 +1,302 @@
 /*
  * SPDX-License-Identifier: CC0-1.0
  *
- * Wi‑Fi менеджер CamBrowser (P4 + C6 / esp_hosted + esp_wifi_remote).
+ * Wi‑Fi менеджер — написан с нуля.
  *
- * Паттерн как в официальных примерах ESP-IDF:
- *  - examples/wifi/getting_started/station  (event group, retry, STA_START→connect)
- *  - examples/wifi/softap_sta               (APSTA, оба netif, один wifi_start)
- *  - network_provisioning / SoftAP portal  (нет кредов → портал, есть → STA)
+ * Порядок init (как station example + esp_hosted):
+ *   nvs → netif → event_loop → netif STA → esp_wifi_init → handlers
+ *   → set_mode/config → start → (STA_START → connect)
  *
- * API для LCD: скан, connect, SoftAP http://192.168.4.1:8080/, тест интернета.
+ * SoftAP портал: WIFI_MODE_APSTA, HTTP :8080 (не конфликтует с /log на :80).
  */
 
-#include <string.h>
 #include <stdio.h>
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include "esp_log.h"
 #include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_http_server.h"
 #include "esp_http_client.h"
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_timer.h"
-#include "nvs_flash.h"
+#include "esp_wifi.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 #include "sdkconfig.h"
-#include "net/wifi_mgr.h"
+
 #include "net/speed_test.h"
+#include "net/wifi_mgr.h"
 
 static const char *TAG = "wifi_mgr";
 
-#define NVS_NS           "wifi_mgr"
-#define NVS_KEY_SSID     "ssid"
-#define NVS_KEY_PASS     "pass"
-#define PORTAL_SSID      "CamBrowser-Setup"
-#define PORTAL_HTTP_PORT 8080
-#define WIFI_MAXIMUM_RETRY  8
-#define WIFI_CONNECTED_BIT  BIT0
-#define WIFI_FAIL_BIT       BIT1
+#define NVS_NS              "wificfg"
+#define NVS_SSID            "ssid"
+#define NVS_PASS            "pass"
+#define AP_SSID             "CamBrowser-Setup"
+#define AP_CHANNEL          6
+#define HTTP_PORT           8080
+#define MAX_RETRY           7
+#define CONNECT_TIMEOUT_MS  20000
 
-static struct {
-    bool inited;
-    bool want_connect;          /* STA_START → esp_wifi_connect() только если true */
-    volatile wifi_mgr_state_t state;
-    char status[48];
-    char ip[16];
-    char saved_ssid[WIFI_MGR_SSID_MAX + 1];
-    char saved_pass[WIFI_MGR_PASS_MAX + 1];
-    wifi_mgr_ap_t aps[WIFI_MGR_SCAN_MAX];
-    int ap_count;
-    int retry;
-    EventGroupHandle_t eg;
-    esp_netif_t *sta_netif;
-    esp_netif_t *ap_netif;
-    httpd_handle_t portal_httpd;
-    bool handlers_reg;
-} s;
+#define BIT_OK   BIT0
+#define BIT_FAIL BIT1
 
-static void set_status(const char *msg)
+typedef struct {
+    bool                 ready;
+    bool                 do_connect; /* true → на STA_START вызвать connect */
+    wifi_mgr_state_t     state;
+    int                  retry;
+    char                 status[40];
+    char                 ip[16];
+    char                 ssid[WIFI_MGR_SSID_MAX + 1];
+    char                 pass[WIFI_MGR_PASS_MAX + 1];
+    wifi_mgr_ap_t        scan[WIFI_MGR_SCAN_MAX];
+    int                  scan_n;
+    EventGroupHandle_t   events;
+    esp_netif_t         *netif_sta;
+    esp_netif_t         *netif_ap;
+    httpd_handle_t       httpd;
+} mgr_t;
+
+static mgr_t M;
+
+static void status_set(const char *s)
 {
-    strlcpy(s.status, msg, sizeof(s.status));
-    ESP_LOGI(TAG, "%s", msg);
+    strlcpy(M.status, s, sizeof(M.status));
+    ESP_LOGI(TAG, "%s", s);
 }
 
-/* ---------- NVS (как provisioning: креды переживают reboot) ---------- */
+/* ---- NVS ---------------------------------------------------------------- */
 
-static void nvs_load(void)
+static void creds_load(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
         return;
     }
-    size_t sz = sizeof(s.saved_ssid);
-    if (nvs_get_str(h, NVS_KEY_SSID, s.saved_ssid, &sz) != ESP_OK) {
-        s.saved_ssid[0] = '\0';
+    size_t n = sizeof(M.ssid);
+    if (nvs_get_str(h, NVS_SSID, M.ssid, &n) != ESP_OK) {
+        M.ssid[0] = '\0';
     }
-    sz = sizeof(s.saved_pass);
-    if (nvs_get_str(h, NVS_KEY_PASS, s.saved_pass, &sz) != ESP_OK) {
-        s.saved_pass[0] = '\0';
+    n = sizeof(M.pass);
+    if (nvs_get_str(h, NVS_PASS, M.pass, &n) != ESP_OK) {
+        M.pass[0] = '\0';
     }
     nvs_close(h);
 }
 
-static esp_err_t nvs_save(const char *ssid, const char *pass)
+static void creds_save(const char *ssid, const char *pass)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return;
     }
-    nvs_set_str(h, NVS_KEY_SSID, ssid ? ssid : "");
-    nvs_set_str(h, NVS_KEY_PASS, pass ? pass : "");
-    err = nvs_commit(h);
+    nvs_set_str(h, NVS_SSID, ssid ? ssid : "");
+    nvs_set_str(h, NVS_PASS, pass ? pass : "");
+    nvs_commit(h);
     nvs_close(h);
-    if (err == ESP_OK) {
-        strlcpy(s.saved_ssid, ssid ? ssid : "", sizeof(s.saved_ssid));
-        strlcpy(s.saved_pass, pass ? pass : "", sizeof(s.saved_pass));
-        ESP_LOGI(TAG, "NVS save SSID=\"%s\"", s.saved_ssid);
-    }
-    return err;
+    strlcpy(M.ssid, ssid ? ssid : "", sizeof(M.ssid));
+    strlcpy(M.pass, pass ? pass : "", sizeof(M.pass));
+    ESP_LOGI(TAG, "сохранено SSID=%s", M.ssid);
 }
 
-/* ---------- Event handler (паттерн station_example_main.c) ---------- */
+/* ---- events (station example) ------------------------------------------- */
 
-static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
+
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        /* Официальный пример: connect только после START и если есть цель */
-        if (s.want_connect) {
+        if (M.do_connect) {
             esp_wifi_connect();
         }
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        s.ip[0] = '\0';
+        return;
+    }
+
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        M.ip[0] = '\0';
         int reason = 0;
         if (data) {
-            wifi_event_sta_disconnected_t *d = data;
+            const wifi_event_sta_disconnected_t *d = data;
             reason = d->reason;
-            ESP_LOGW(TAG, "disconnect ssid=%s reason=%d rssi=%d",
-                     (const char *)d->ssid, reason, (int)d->rssi);
+            ESP_LOGW(TAG, "обрыв reason=%d", reason);
         }
-        if (!s.want_connect) {
+        if (!M.do_connect) {
             return;
         }
-        if (s.retry < WIFI_MAXIMUM_RETRY) {
-            s.retry++;
-            char buf[40];
-            snprintf(buf, sizeof(buf), "wifi: retry %d/%d", s.retry, WIFI_MAXIMUM_RETRY);
-            set_status(buf);
-            s.state = WIFI_MGR_CONNECTING;
+        if (M.retry < MAX_RETRY) {
+            M.retry++;
+            char b[32];
+            snprintf(b, sizeof(b), "повтор %d/%d", M.retry, MAX_RETRY);
+            status_set(b);
+            M.state = WIFI_MGR_CONNECTING;
             esp_wifi_connect();
         } else {
-            s.state = WIFI_MGR_FAIL;
-            if (reason == 202 || reason == 15) {
-                set_status("wifi: неверный пароль?");
-            } else if (reason == 201) {
-                set_status("wifi: сеть не найдена");
-            } else if (reason == 203) {
-                set_status("wifi: assoc fail");
-            } else {
-                set_status("wifi: нет связи");
-            }
-            if (s.eg) {
-                xEventGroupSetBits(s.eg, WIFI_FAIL_BIT);
-            }
+            M.state = WIFI_MGR_FAIL;
+            status_set(reason == 201 ? "сеть не найдена" :
+                       (reason == 202 || reason == 15) ? "неверный пароль?" :
+                       reason == 203 ? "assoc fail" : "нет связи");
+            xEventGroupSetBits(M.events, BIT_FAIL);
         }
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
-        set_status("портал: 192.168.4.1:8080");
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
-        snprintf(s.ip, sizeof(s.ip), IPSTR, IP2STR(&e->ip_info.ip));
-        s.retry = 0;
-        s.state = WIFI_MGR_CONNECTED;
-        set_status("wifi: есть IP");
-        ESP_LOGI(TAG, "got ip: %s", s.ip);
-        /* softap_sta: STA = default interface для исходящего трафика */
-        if (s.sta_netif) {
-            esp_netif_set_default_netif(s.sta_netif);
-            ESP_LOGI(TAG, "default netif = STA");
+        return;
+    }
+
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *e = data;
+        snprintf(M.ip, sizeof(M.ip), IPSTR, IP2STR(&e->ip_info.ip));
+        M.retry = 0;
+        M.state = WIFI_MGR_CONNECTED;
+        status_set("есть IP");
+        ESP_LOGI(TAG, "IP %s", M.ip);
+        if (M.netif_sta) {
+            esp_netif_set_default_netif(M.netif_sta);
         }
-        if (s.eg) {
-            xEventGroupSetBits(s.eg, WIFI_CONNECTED_BIT);
-        }
+        xEventGroupSetBits(M.events, BIT_OK);
+        return;
+    }
+
+    if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
+        status_set("портал 192.168.4.1:8080");
     }
 }
 
-static esp_err_t ensure_stack(void)
+static esp_err_t stack_init(void)
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    esp_err_t e = nvs_flash_init();
+    if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+        e = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(e);
 
-    err = esp_netif_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
+    e = esp_netif_init();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        return e;
     }
-    err = esp_event_loop_create_default();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    if (s.sta_netif == NULL) {
-        s.sta_netif = esp_netif_create_default_wifi_sta();
-    }
-    if (s.eg == NULL) {
-        s.eg = xEventGroupCreate();
+    e = esp_event_loop_create_default();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        return e;
     }
 
-    static bool wifi_inited;
-    if (!wifi_inited) {
+    if (!M.events) {
+        M.events = xEventGroupCreate();
+    }
+    if (!M.netif_sta) {
+        M.netif_sta = esp_netif_create_default_wifi_sta();
+    }
+
+    static bool wifi_ok;
+    if (!wifi_ok) {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-        wifi_inited = true;
-    }
-
-    if (!s.handlers_reg) {
         ESP_ERROR_CHECK(esp_event_handler_instance_register(
-            WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
+            WIFI_EVENT, ESP_EVENT_ANY_ID, &on_event, NULL, NULL));
         ESP_ERROR_CHECK(esp_event_handler_instance_register(
-            IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
-        s.handlers_reg = true;
+            IP_EVENT, IP_EVENT_STA_GOT_IP, &on_event, NULL, NULL));
+        wifi_ok = true;
     }
     return ESP_OK;
 }
 
-/* ---------- Public API ---------- */
+/* ---- API ---------------------------------------------------------------- */
 
 esp_err_t wifi_mgr_init(void)
 {
 #if !CONFIG_EB_WIFI_ENABLE
-    set_status("wifi: выключен в Kconfig");
+    status_set("выключен");
     return ESP_ERR_NOT_SUPPORTED;
 #else
-    if (s.inited) {
+    if (M.ready) {
         return ESP_OK;
     }
-    memset(&s, 0, sizeof(s));
-    set_status("wifi: инициализация");
-    esp_err_t err = ensure_stack();
-    if (err != ESP_OK) {
-        set_status("wifi: сбой стека");
-        return err;
+    memset(&M, 0, sizeof(M));
+    status_set("старт...");
+    if (stack_init() != ESP_OK) {
+        status_set("ошибка стека");
+        return ESP_FAIL;
     }
-    nvs_load();
-    s.inited = true;
+    creds_load();
+    M.ready = true;
 
-    /* Есть сохранённые креды → STA connect (паттерн station example) */
-    if (s.saved_ssid[0]) {
-        return wifi_mgr_connect(s.saved_ssid, s.saved_pass);
+    if (M.ssid[0]) {
+        return wifi_mgr_connect(M.ssid, M.pass);
     }
-    /* Kconfig, если не placeholder */
-    if (strlen(CONFIG_EB_WIFI_SSID) > 0 &&
-        strcmp(CONFIG_EB_WIFI_SSID, "myssid") != 0) {
+    if (strcmp(CONFIG_EB_WIFI_SSID, "myssid") != 0 && CONFIG_EB_WIFI_SSID[0]) {
         return wifi_mgr_connect(CONFIG_EB_WIFI_SSID, CONFIG_EB_WIFI_PASSWORD);
     }
 
-    /* Нет кредов: STA idle, без connect (не цепляться к хвосту NVS esp_wifi) */
-    s.want_connect = false;
+    /* Нет кредов: STA без connect */
+    M.do_connect = false;
     wifi_config_t empty = { 0 };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &empty));
     ESP_ERROR_CHECK(esp_wifi_start());
-    s.state = WIFI_MGR_IDLE;
-    set_status("wifi: нет сети — ПОРТАЛ или СКАН");
+    M.state = WIFI_MGR_IDLE;
+    status_set("нет сети — откройте Wi-Fi");
     return ESP_OK;
 #endif
 }
 
-wifi_mgr_state_t wifi_mgr_state(void) { return s.state; }
-const char *wifi_mgr_status_str(void) { return s.status[0] ? s.status : "wifi: —"; }
-const char *wifi_mgr_ip_str(void) { return s.ip; }
-bool wifi_mgr_ready(void) { return s.state == WIFI_MGR_CONNECTED && s.ip[0]; }
-const char *wifi_mgr_saved_ssid(void) { return s.saved_ssid; }
+wifi_mgr_state_t wifi_mgr_state(void) { return M.state; }
+const char *wifi_mgr_status_str(void) { return M.status[0] ? M.status : "—"; }
+const char *wifi_mgr_ip_str(void) { return M.ip; }
+const char *wifi_mgr_saved_ssid(void) { return M.ssid; }
+bool wifi_mgr_ready(void) { return M.state == WIFI_MGR_CONNECTED && M.ip[0]; }
 
 esp_err_t wifi_mgr_scan(void)
 {
 #if !CONFIG_EB_WIFI_ENABLE
     return ESP_ERR_NOT_SUPPORTED;
 #else
-    ESP_ERROR_CHECK(ensure_stack());
-    s.state = WIFI_MGR_SCANNING;
-    s.ap_count = 0;
-    set_status("wifi: сканирование...");
+    ESP_ERROR_CHECK(stack_init());
+    M.state = WIFI_MGR_SCANNING;
+    M.scan_n = 0;
+    status_set("скан...");
 
     wifi_mode_t mode = WIFI_MODE_NULL;
     esp_wifi_get_mode(&mode);
     if (mode == WIFI_MODE_NULL) {
-        s.want_connect = false;
+        M.do_connect = false;
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());
     }
 
-    wifi_scan_config_t sc = {
-        .ssid = NULL,
-        .bssid = NULL,
-        .channel = 0,
-        .show_hidden = false,
-        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-    };
-    esp_err_t err = esp_wifi_scan_start(&sc, true);
-    if (err != ESP_OK) {
-        set_status("wifi: скан не удался");
-        s.state = WIFI_MGR_FAIL;
-        return err;
+    wifi_scan_config_t sc = { 0 };
+    sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
+        status_set("скан ошибка");
+        M.state = WIFI_MGR_FAIL;
+        return ESP_FAIL;
     }
+
     uint16_t n = WIFI_MGR_SCAN_MAX;
     wifi_ap_record_t rec[WIFI_MGR_SCAN_MAX];
     if (esp_wifi_scan_get_ap_records(&n, rec) != ESP_OK) {
         n = 0;
     }
-    s.ap_count = (int)n;
-    for (int i = 0; i < s.ap_count; i++) {
-        strlcpy(s.aps[i].ssid, (const char *)rec[i].ssid, sizeof(s.aps[i].ssid));
-        s.aps[i].rssi = rec[i].rssi;
-        s.aps[i].authmode = (uint8_t)rec[i].authmode;
-        s.aps[i].is_open = (rec[i].authmode == WIFI_AUTH_OPEN);
+    M.scan_n = (int)n;
+    for (int i = 0; i < M.scan_n; i++) {
+        strlcpy(M.scan[i].ssid, (const char *)rec[i].ssid, sizeof(M.scan[i].ssid));
+        M.scan[i].rssi = rec[i].rssi;
+        M.scan[i].authmode = (uint8_t)rec[i].authmode;
+        M.scan[i].is_open = (rec[i].authmode == WIFI_AUTH_OPEN);
     }
-    char buf[40];
-    snprintf(buf, sizeof(buf), "wifi: найдено %d", s.ap_count);
-    set_status(buf);
-    s.state = WIFI_MGR_IDLE;
+    char b[24];
+    snprintf(b, sizeof(b), "найдено %d", M.scan_n);
+    status_set(b);
+    M.state = WIFI_MGR_IDLE;
     return ESP_OK;
 #endif
 }
 
-int wifi_mgr_scan_count(void) { return s.ap_count; }
+int wifi_mgr_scan_count(void) { return M.scan_n; }
 
-const wifi_mgr_ap_t *wifi_mgr_scan_get(int index)
+const wifi_mgr_ap_t *wifi_mgr_scan_get(int i)
 {
-    if (index < 0 || index >= s.ap_count) {
-        return NULL;
-    }
-    return &s.aps[index];
+    return (i >= 0 && i < M.scan_n) ? &M.scan[i] : NULL;
 }
 
 esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
@@ -323,124 +304,117 @@ esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
 #if !CONFIG_EB_WIFI_ENABLE
     return ESP_ERR_NOT_SUPPORTED;
 #else
-    if (ssid == NULL || ssid[0] == '\0') {
+    if (!ssid || !ssid[0]) {
         return ESP_ERR_INVALID_ARG;
     }
-    ESP_ERROR_CHECK(ensure_stack());
+    ESP_ERROR_CHECK(stack_init());
 
-    const char *pass = password;
-    if (pass == NULL && s.saved_ssid[0] && strcmp(ssid, s.saved_ssid) == 0) {
-        pass = s.saved_pass;
+    const char *pw = password;
+    if (!pw && M.ssid[0] && strcmp(ssid, M.ssid) == 0) {
+        pw = M.pass;
     }
 
-    s.want_connect = true;
-    s.retry = 0;
-    s.ip[0] = '\0';
-    s.state = WIFI_MGR_CONNECTING;
-    set_status("wifi: подключение...");
-    if (s.eg) {
-        xEventGroupClearBits(s.eg, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    if (M.httpd) {
+        httpd_stop(M.httpd);
+        M.httpd = NULL;
     }
 
-    /* Как в station example: mode → config → start → (STA_START → connect) */
-    wifi_config_t wcfg = { 0 };
-    strlcpy((char *)wcfg.sta.ssid, ssid, sizeof(wcfg.sta.ssid));
-    if (pass) {
-        strlcpy((char *)wcfg.sta.password, pass, sizeof(wcfg.sta.password));
-    }
-    wcfg.sta.threshold.authmode = (pass && pass[0]) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-    wcfg.sta.pmf_cfg.capable = true;
-    wcfg.sta.pmf_cfg.required = false;
+    M.do_connect = true;
+    M.retry = 0;
+    M.ip[0] = '\0';
+    M.state = WIFI_MGR_CONNECTING;
+    status_set("подключение...");
+    xEventGroupClearBits(M.events, BIT_OK | BIT_FAIL);
 
-    /* Портал мог оставить APSTA — переводим в чистый STA */
-    if (s.portal_httpd) {
-        httpd_stop(s.portal_httpd);
-        s.portal_httpd = NULL;
+    wifi_config_t cfg = { 0 };
+    strlcpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
+    if (pw) {
+        strlcpy((char *)cfg.sta.password, pw, sizeof(cfg.sta.password));
     }
+    cfg.sta.threshold.authmode = (pw && pw[0]) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wcfg));
-    esp_err_t err = esp_wifi_start();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
-        return err;
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+    esp_err_t e = esp_wifi_start();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        status_set("start fail");
+        return e;
     }
-    /* Если уже был START — connect вручную */
-    esp_wifi_connect();
+    esp_wifi_connect(); /* если STA уже был START */
 
     EventBits_t bits = xEventGroupWaitBits(
-        s.eg, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-        pdTRUE, pdFALSE, pdMS_TO_TICKS(20000));
+        M.events, BIT_OK | BIT_FAIL, pdTRUE, pdFALSE,
+        pdMS_TO_TICKS(CONNECT_TIMEOUT_MS));
 
-    if (bits & WIFI_CONNECTED_BIT) {
-        nvs_save(ssid, pass ? pass : "");
+    if (bits & BIT_OK) {
+        creds_save(ssid, pw ? pw : "");
         return ESP_OK;
     }
-    s.state = WIFI_MGR_FAIL;
-    if (!(bits & WIFI_FAIL_BIT)) {
-        set_status("wifi: таймаут");
+    M.state = WIFI_MGR_FAIL;
+    if (!(bits & BIT_FAIL)) {
+        status_set("таймаут");
     }
     return ESP_ERR_TIMEOUT;
 #endif
 }
 
-/* ---------- SoftAP портал (softap_sta + HTTP form) ---------- */
+/* ---- SoftAP + HTTP ------------------------------------------------------ */
 
-static esp_err_t portal_root_get(httpd_req_t *req)
+static esp_err_t http_get_root(httpd_req_t *req)
 {
-    static const char *html =
+    const char *page =
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-        "<title>CamBrowser Wi-Fi</title>"
-        "<style>"
-        "body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:16px}"
-        "h1{color:#6cf}input,button{font-size:1rem;padding:10px;margin:6px 0;width:100%;max-width:320px}"
-        "button{background:#06c;color:#fff;border:0;border-radius:8px}"
-        "</style></head><body>"
-        "<h1>Настройка Wi-Fi</h1>"
-        "<p>Только <b>2.4 ГГц</b>. После сохранения плата подключится к сети.</p>"
+        "<title>Wi-Fi</title>"
+        "<style>body{font-family:sans-serif;background:#111;color:#eee;margin:1rem}"
+        "input,button{display:block;width:100%;max-width:20rem;margin:.5rem 0;padding:.6rem}"
+        "button{background:#06c;color:#fff;border:0;border-radius:6px}</style></head><body>"
+        "<h1>CamBrowser Wi-Fi</h1><p>Только 2.4 ГГц</p>"
         "<form method=POST action=/save>"
-        "<label>SSID</label><input name=ssid required maxlength=32>"
-        "<label>Пароль</label><input name=pass type=password maxlength=64>"
-        "<button type=submit>Сохранить и подключить</button>"
-        "</form></body></html>";
+        "<input name=ssid placeholder=SSID required maxlength=32>"
+        "<input name=pass type=password placeholder=Пароль maxlength=64>"
+        "<button>Сохранить</button></form></body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_sendstr(req, page);
 }
 
-static esp_err_t portal_save_post(httpd_req_t *req)
+static void form_get(const char *body, const char *key, char *out, size_t out_sz)
 {
-    char buf[192];
-    int n = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    out[0] = '\0';
+    char k[16];
+    snprintf(k, sizeof(k), "%s=", key);
+    const char *p = strstr(body, k);
+    if (!p) {
+        return;
+    }
+    p += strlen(k);
+    size_t i = 0;
+    while (*p && *p != '&' && i + 1 < out_sz) {
+        out[i++] = (*p == '+') ? ' ' : *p;
+        p++;
+    }
+    out[i] = '\0';
+}
+
+static esp_err_t http_post_save(httpd_req_t *req)
+{
+    char body[200];
+    int n = httpd_req_recv(req, body, sizeof(body) - 1);
     if (n <= 0) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty");
     }
-    buf[n] = '\0';
-    char ssid[WIFI_MGR_SSID_MAX + 1] = { 0 };
-    char pass[WIFI_MGR_PASS_MAX + 1] = { 0 };
-    char *p = strstr(buf, "ssid=");
-    if (p) {
-        p += 5;
-        char *e = strchr(p, '&');
-        size_t len = e ? (size_t)(e - p) : strlen(p);
-        if (len > WIFI_MGR_SSID_MAX) len = WIFI_MGR_SSID_MAX;
-        memcpy(ssid, p, len);
-        for (char *q = ssid; *q; q++) if (*q == '+') *q = ' ';
-    }
-    p = strstr(buf, "pass=");
-    if (p) {
-        p += 5;
-        char *e = strchr(p, '&');
-        size_t len = e ? (size_t)(e - p) : strlen(p);
-        if (len > WIFI_MGR_PASS_MAX) len = WIFI_MGR_PASS_MAX;
-        memcpy(pass, p, len);
-        for (char *q = pass; *q; q++) if (*q == '+') *q = ' ';
-    }
+    body[n] = '\0';
+
+    char ssid[WIFI_MGR_SSID_MAX + 1];
+    char pass[WIFI_MGR_PASS_MAX + 1];
+    form_get(body, "ssid", ssid, sizeof(ssid));
+    form_get(body, "pass", pass, sizeof(pass));
+
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr(req, "<html><body style='background:#111;color:#eee'>"
-                            "<h2>Сохранено</h2><p>Подключаюсь...</p></body></html>");
+                            "<p>Подключаюсь...</p></body></html>");
+
     if (ssid[0]) {
-        nvs_save(ssid, pass);
         wifi_mgr_stop_portal();
         wifi_mgr_connect(ssid, pass);
     }
@@ -452,104 +426,102 @@ esp_err_t wifi_mgr_start_portal(void)
 #if !CONFIG_EB_WIFI_ENABLE
     return ESP_ERR_NOT_SUPPORTED;
 #else
-    ESP_ERROR_CHECK(ensure_stack());
-    s.want_connect = false; /* не долбить connect во время AP */
+    ESP_ERROR_CHECK(stack_init());
+    M.do_connect = false;
 
-    if (s.ap_netif == NULL) {
-        s.ap_netif = esp_netif_create_default_wifi_ap();
+    if (!M.netif_ap) {
+        M.netif_ap = esp_netif_create_default_wifi_ap();
     }
 
     wifi_config_t ap = { 0 };
-    strlcpy((char *)ap.ap.ssid, PORTAL_SSID, sizeof(ap.ap.ssid));
-    ap.ap.ssid_len = strlen(PORTAL_SSID);
-    ap.ap.channel = 6;
+    strlcpy((char *)ap.ap.ssid, AP_SSID, sizeof(ap.ap.ssid));
+    ap.ap.ssid_len = strlen(AP_SSID);
+    ap.ap.channel = AP_CHANNEL;
     ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_OPEN;
 
-    /* softap_sta: APSTA, оба конфига, затем start */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    esp_err_t err = esp_wifi_start();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
+    esp_err_t e = esp_wifi_start();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        return e;
     }
 
-    if (s.portal_httpd == NULL) {
-        httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-        cfg.server_port = PORTAL_HTTP_PORT;
-        cfg.max_uri_handlers = 6;
-        if (httpd_start(&s.portal_httpd, &cfg) == ESP_OK) {
-            httpd_uri_t u1 = { .uri = "/", .method = HTTP_GET, .handler = portal_root_get };
-            httpd_uri_t u2 = { .uri = "/save", .method = HTTP_POST, .handler = portal_save_post };
-            httpd_register_uri_handler(s.portal_httpd, &u1);
-            httpd_register_uri_handler(s.portal_httpd, &u2);
+    if (!M.httpd) {
+        httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
+        hc.server_port = HTTP_PORT;
+        hc.max_uri_handlers = 4;
+        if (httpd_start(&M.httpd, &hc) == ESP_OK) {
+            httpd_uri_t a = { .uri = "/", .method = HTTP_GET, .handler = http_get_root };
+            httpd_uri_t b = { .uri = "/save", .method = HTTP_POST, .handler = http_post_save };
+            httpd_register_uri_handler(M.httpd, &a);
+            httpd_register_uri_handler(M.httpd, &b);
         }
     }
-    s.state = WIFI_MGR_AP_MODE;
-    set_status("AP CamBrowser-Setup :8080");
+    M.state = WIFI_MGR_AP_MODE;
+    status_set("портал CamBrowser-Setup");
     return ESP_OK;
 #endif
 }
 
 esp_err_t wifi_mgr_stop_portal(void)
 {
-    if (s.portal_httpd) {
-        httpd_stop(s.portal_httpd);
-        s.portal_httpd = NULL;
+    if (M.httpd) {
+        httpd_stop(M.httpd);
+        M.httpd = NULL;
     }
     esp_wifi_set_mode(WIFI_MODE_STA);
-    if (s.state == WIFI_MGR_AP_MODE) {
-        s.state = WIFI_MGR_IDLE;
-        set_status("портал выключен");
+    if (M.state == WIFI_MGR_AP_MODE) {
+        M.state = WIFI_MGR_IDLE;
+        status_set("портал выкл");
     }
     return ESP_OK;
 }
 
 esp_err_t wifi_mgr_test_internet(wifi_mgr_test_t *out)
 {
-    if (out == NULL) {
+    if (!out) {
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
-    s.state = WIFI_MGR_TESTING;
-    set_status("тест: HTTP...");
+    M.state = WIFI_MGR_TESTING;
+    status_set("тест HTTP...");
 
     int64_t t0 = esp_timer_get_time();
     esp_http_client_config_t cfg = {
         .url = "http://connectivitycheck.gstatic.com/generate_204",
         .timeout_ms = 8000,
     };
-    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
-    if (!cli) {
-        strlcpy(out->note, "http init fail", sizeof(out->note));
-        s.state = WIFI_MGR_FAIL;
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) {
+        strlcpy(out->note, "init fail", sizeof(out->note));
+        M.state = WIFI_MGR_FAIL;
         return ESP_FAIL;
     }
-    esp_err_t err = esp_http_client_perform(cli);
-    int status = esp_http_client_get_status_code(cli);
-    esp_http_client_cleanup(cli);
+    esp_err_t e = esp_http_client_perform(c);
+    out->http_status = esp_http_client_get_status_code(c);
+    esp_http_client_cleanup(c);
     out->latency_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
-    out->http_status = status;
 
-    if (err != ESP_OK || (status != 204 && status != 200)) {
-        snprintf(out->note, sizeof(out->note), "нет сети (HTTP %d)", status);
-        set_status(out->note);
+    if (e != ESP_OK || (out->http_status != 204 && out->http_status != 200)) {
+        snprintf(out->note, sizeof(out->note), "нет сети HTTP %d", out->http_status);
+        status_set(out->note);
         out->ok = false;
-        s.state = WIFI_MGR_FAIL;
+        M.state = WIFI_MGR_FAIL;
         return ESP_FAIL;
     }
 
-    set_status("тест: скорость...");
-    speed_result_t spd;
-    if (speed_test_run(&spd) == ESP_OK) {
-        out->mbps = spd.mbps;
-        snprintf(out->note, sizeof(out->note), "OK %.1f Мбит/с, %u мс",
-                 (double)spd.mbps, (unsigned)out->latency_ms);
+    status_set("тест скорости...");
+    speed_result_t sp;
+    if (speed_test_run(&sp) == ESP_OK) {
+        out->mbps = sp.mbps;
+        snprintf(out->note, sizeof(out->note), "OK %.1f Мбит/с %uмс",
+                 (double)sp.mbps, (unsigned)out->latency_ms);
     } else {
-        snprintf(out->note, sizeof(out->note), "HTTP OK (%u мс)", (unsigned)out->latency_ms);
+        snprintf(out->note, sizeof(out->note), "HTTP OK %uмс", (unsigned)out->latency_ms);
     }
     out->ok = true;
-    set_status(out->note);
-    s.state = WIFI_MGR_CONNECTED;
+    status_set(out->note);
+    M.state = WIFI_MGR_CONNECTED;
     return ESP_OK;
 }
