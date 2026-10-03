@@ -616,8 +616,8 @@ static const ui_button_t home_apps[] = {
     { 352, 108, 320, 142, "ВИДЕО",  BTN_VIDEO, 3 },
     { 684, 108, 320, 142, "ФИЛЬМЫ", BTN_FILMS, 3 },
 #if CONFIG_EB_WIFI_ENABLE
-    /* компактная карточка справа, без наложений на клавиатуру */
-    { 684, 268, 320, 88, "Wi-Fi",  BTN_WIFI,  2 },
+    /* широкая полоса под карточками приложений (не клавиатура) */
+    { 20,  255, 984, 72, "Wi-Fi",  BTN_WIFI,  2 },
 #endif
 };
 #define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
@@ -2090,6 +2090,7 @@ static void browser_task(void *arg)
 #if CONFIG_EB_WIFI_ENABLE
                     case BTN_WIFI:
                         br.state = ST_WIFI;
+                        draw_screen();
                         break;
 #endif
                     case BTN_RADIO:
