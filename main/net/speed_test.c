@@ -21,7 +21,7 @@
 #include "sdkconfig.h"
 #include "net/app_net.h"
 #include "net/app_eth.h"
-#include "net/app_wifi.h"
+#include "net/wifi_mgr.h"
 #include "net/speed_test.h"
 
 static const char *TAG = "speed_test";
@@ -44,7 +44,7 @@ static speed_iface_t detect_iface(void)
     }
 #endif
 #if CONFIG_EB_WIFI_ENABLE
-    if (app_wifi_ready()) {
+    if (wifi_mgr_ready()) {
         return SPEED_IF_WIFI;
     }
 #endif
