@@ -464,31 +464,17 @@ static esp_err_t player_start(const char *url, bool video)
     }
     esp_player_set_event_cb(s_mp.player, player_event_cb, NULL);
 
-    /* Встроенный demux pool для видео — 100 КБ (player_defaults_cfg.h).
-     * На типичном потоке archive.org он насыщается при ~140 мс буфера, а
-     * вентиль ребуферизации ждёт 300 мс → вентиль сдаётся и отключается
-     * («Demux pool saturated ... disabling the re-buffering gate»), дальше
-     * воспроизведение идёт «в голод» и каждый поздний кадр даёт
-     * «Write too slow» от видеорендера. Пул в PSRAM держит секунды потока,
-     * вентиль реально доходит до порога resume, сетевые рывки сглаживаются.
-     * Менять конфиг можно только в IDLE/STOPPED/FINISHED — сразу после
-     * init это как раз так.
-     *
-     * Сетевая подстройка: штатные пороги вентиля 400/200/300 мс — под
-     * быстрые линки. На реальных archive.org demux едва держит один цикл
-     * («saturated at 278 ms»), вентиль отключается. Нужен запас:
-     * demux pool + HTTP read-ahead + prebuffer (PSRAM 32 МБ).
-     *
-     * CDN archive.org рвёт длинные TLS (MBEDTLS -0x004C / ENOTCONN).
-     * Больше HTTP read-ahead + demux pool → реже starve при реконнекте.
-     * (Журнал: E-HTTP-TLS-RECONNECT, 2026-10-03.) */
+    /* Буферы под сеть + SW H.264 на P4 (нет HW decode).
+     * Espressif esp_player: P4 H.264 ≈ 320×240@68 / 640×480@18 — выше 360p
+     * почти всегда «slideshow». archive.org + TLS reconnect → нужен запас.
+     * (Журналы: E-HTTP-TLS-RECONNECT, E-PLAYBACK-SMOOTH.) */
     esp_player_buffer_config_t bcfg = {
-        .extractor_pool_size = 4 * 1024 * 1024,
-        .http_read_buf_size  = 512 * 1024,
-        .prebuffer_resume_ms = 2000,
-        .rebuffer_enter_ms   = 500,
-        .rebuffer_resume_ms  = 1500,
-        .rebuffer_grace_ms   = 300,
+        .extractor_pool_size = 6 * 1024 * 1024, /* demux в PSRAM */
+        .http_read_buf_size  = 768 * 1024,      /* read-ahead HTTP */
+        .prebuffer_resume_ms = 2500,            /* дольше копить до PLAY */
+        .rebuffer_enter_ms   = 600,
+        .rebuffer_resume_ms  = 1800,
+        .rebuffer_grace_ms   = 350,
     };
     if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {
         ESP_LOGW(TAG, "переопределение buffer cfg не удалось, оставляем встроенные");
@@ -497,18 +483,16 @@ static esp_err_t player_start(const char *url, bool video)
     player_buf_evt_reset();
     pstats_osd_set(video);
 
-    /* По умолчанию esp_player сажает video_decoder на ядро 0 — CPU-тяжёлый
-     * SW H.264 (tinyh264) душит IDLE0 → срабатывания task watchdog и
-     * конкуренция со всем на ядре 0. Меняем: декод видео → ядро 1,
-     * видеорендер (SW color cvt + PPA + LCD flush) → ядро 0.
-     * Аудио — штатные defaults (decoder=1, render=0).
-     * Stack/prio как в player_defaults_cfg.h. */
+    /* Ядра: SW H.264 (tinyh264) на CPU1, рендер+PPA+OSD на CPU0.
+     * Декодеру выше prio и стек в PSRAM (stack_in_ext): меньше конкуренции
+     * с IDLE/TWDT и больше запас под SPS/кадры. Рендер чуть ниже декода,
+     * чтобы не отбирать кванты у tinyh264. (E-PLAYBACK-SMOOTH) */
     esp_player_task_config_t tcfg = {
-        .extractor     = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
-        .audio_decoder = { .stack = 5120, .prio = 5, .core = 1, .stack_in_ext = 0 },
-        .audio_render  = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
-        .video_decoder = { .stack = 5120, .prio = 5, .core = 1, .stack_in_ext = 0 },
-        .video_render  = { .stack = 5120, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .extractor     = { .stack = 8192, .prio = 5, .core = 0, .stack_in_ext = 1 },
+        .audio_decoder = { .stack = 6144, .prio = 5, .core = 1, .stack_in_ext = 1 },
+        .audio_render  = { .stack = 6144, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .video_decoder = { .stack = 12288, .prio = 6, .core = 1, .stack_in_ext = 1 },
+        .video_render  = { .stack = 8192, .prio = 5, .core = 0, .stack_in_ext = 0 },
     };
     esp_player_set_task_config(s_mp.player, &tcfg);
 
@@ -521,6 +505,12 @@ static esp_err_t player_start(const char *url, bool video)
     }
 
     ESP_LOGI(TAG, "старт %s: %s", video ? "видео" : "радио", url);
+    if (video) {
+        /* P4: HW H.264 decode нет. Для плавности — SD + tools/convert_movie
+         * (320×180@20 Baseline). Сеть 512×288 часто даёт buffering. */
+        ESP_LOGI(TAG, "подсказка: плавно = SD + convert_movie (320x180 Baseline); "
+                      "сеть 512x288 — на грани SW decode");
+    }
     return ESP_OK;
 
 fail:
@@ -581,6 +571,10 @@ esp_err_t media_player_init(void)
     esp_log_level_set("ESP_PLAYER_HELPER", ESP_LOG_NONE);
     /* Шторм реконнектов CDN (archive.org) — не засоряем UART на каждый Open */
     esp_log_level_set("ESP_GMF_HTTP", ESP_LOG_WARN);
+    /* GMF порт/таски сыпят ACQ IN на каждый кадр — режем до ERROR на сессию */
+    esp_log_level_set("ESP_GMF_PORT", ESP_LOG_ERROR);
+    esp_log_level_set("ESP_GMF_TASK", ESP_LOG_WARN);
+    esp_log_level_set("VIDEO_RENDER_PROC", ESP_LOG_WARN);
 
     /* SW H.264 декодер закономерно загружает своё ядро (1) на минуты
      * на потоках уровня 360p; IDLE1 не бегает, task watchdog сыпет
