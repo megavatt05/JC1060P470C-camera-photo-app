@@ -125,6 +125,8 @@ CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64=y
 
 # --- Сеть: Ethernet + опциональный Wi-Fi (C6) ---
 CONFIG_EB_ETH_ENABLE=y
-# CONFIG_EB_WIFI_ENABLE is not set
-# Включить Wi-Fi: menuconfig → CamBrowser → Enable Wi-Fi, SSID/password
+# Wi-Fi через ESP32-C6 (SDIO / esp_hosted). Смените SSID и пароль!
+CONFIG_EB_WIFI_ENABLE=y
+CONFIG_EB_WIFI_SSID="myssid"
+CONFIG_EB_WIFI_PASSWORD="mypassword"
 CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
