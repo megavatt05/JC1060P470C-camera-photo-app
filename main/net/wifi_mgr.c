@@ -308,10 +308,15 @@ esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
 
     wifi_config_t wcfg = { 0 };
     strlcpy((char *)wcfg.sta.ssid, ssid, sizeof(wcfg.sta.ssid));
-    if (password) {
-        strlcpy((char *)wcfg.sta.password, password, sizeof(wcfg.sta.password));
+    /* NULL password → берём из NVS (кнопка «ПОДКЛ NVS») */
+    const char *pass = password;
+    if (pass == NULL && s.saved_ssid[0] && strcmp(ssid, s.saved_ssid) == 0) {
+        pass = s.saved_pass;
     }
-    wcfg.sta.threshold.authmode = password && password[0]
+    if (pass) {
+        strlcpy((char *)wcfg.sta.password, pass, sizeof(wcfg.sta.password));
+    }
+    wcfg.sta.threshold.authmode = pass && pass[0]
                                       ? WIFI_AUTH_WPA2_PSK
                                       : WIFI_AUTH_OPEN;
 
