@@ -616,7 +616,8 @@ static const ui_button_t home_apps[] = {
     { 352, 108, 320, 142, "ВИДЕО",  BTN_VIDEO, 3 },
     { 684, 108, 320, 142, "ФИЛЬМЫ", BTN_FILMS, 3 },
 #if CONFIG_EB_WIFI_ENABLE
-    { 20,  268, 320, 100, "Wi-Fi",  BTN_WIFI,  3 },
+    /* компактная карточка справа, без наложений на клавиатуру */
+    { 684, 268, 320, 88, "Wi-Fi",  BTN_WIFI,  2 },
 #endif
 };
 #define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
@@ -634,14 +635,24 @@ static bool home_apps_hit(int x, int y, int *out_id)
 
 static const ui_icon_t *home_app_icon(size_t i)
 {
+    /* иконки карточек HOME: радио / видео / фильмы / Wi‑Fi */
     static const ui_icon_t *const icons[] = {
         &ui_icon_music, &ui_icon_clap, &ui_icon_film,
+#if CONFIG_EB_WIFI_ENABLE
+        &ui_icon_globe,
+#endif
     };
+    if (i >= sizeof(icons) / sizeof(icons[0])) {
+        return &ui_icon_search;
+    }
     return icons[i];
 }
 
-static const uint16_t home_app_color[3] = {
+static const uint16_t home_app_color[] = {
     UI_COLOR_OK, UI_COLOR_WARN, UI_COLOR_ACCENT,
+#if CONFIG_EB_WIFI_ENABLE
+    UI_COLOR_ACCENT2,
+#endif
 };
 
 /* Radio: station tile geometry, shared by draw and hit-test */
@@ -1503,18 +1514,25 @@ static void draw_home(uint16_t *fb)
                        UI_R_CARD, UI_COLOR_BORDER);
 
         const ui_icon_t *ic = home_app_icon(i);
-        uint16_t col = home_app_color[i];
-        /* icon on a soft circle */
-        ui_circle(fb, LCD_W, LCD_H, b->x + b->w / 2, b->y + 44, 24, UI_COLOR_BG_PRESS);
-        ui_icon(ic, fb, LCD_W, LCD_H, b->x + b->w / 2 - 16, b->y + 44 - 16, 2, col);
-
-        int tw = ui_text_width(b->label, 3);
-        ui_text(fb, LCD_W, LCD_H, b->x + (b->w - tw) / 2, b->y + 84, b->label, 3,
+        uint16_t col = home_app_color[i % (sizeof(home_app_color) / sizeof(home_app_color[0]))];
+        /* иконка на круге; для низкой карточки Wi‑Fi — компактнее */
+        int icy = b->y + (b->h < 120 ? 28 : 44);
+        int isc = (b->h < 120) ? 1 : 2;
+        int ir = (b->h < 120) ? 16 : 24;
+        ui_circle(fb, LCD_W, LCD_H, b->x + b->w / 2, icy, ir, UI_COLOR_BG_PRESS);
+        if (ic) {
+            ui_icon(ic, fb, LCD_W, LCD_H,
+                    b->x + b->w / 2 - 8 * isc, icy - 8 * isc, isc, col);
+        }
+        int sc = (b->scale > 0) ? b->scale : 3;
+        int tw = ui_text_width(b->label, sc);
+        int ty = b->y + b->h - (sc * 8) - 12;
+        ui_text(fb, LCD_W, LCD_H, b->x + (b->w - tw) / 2, ty, b->label, sc,
                 UI_COLOR_FG, UI_COLOR_PANEL);
     }
     const char *hint = "введите запрос и нажмите GO";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
-            288, hint, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
+            370, hint, UI_SCALE_TEXT, UI_COLOR_DIM, UI_COLOR_BG);
 #else
     const char *hint = "type a search query, then GO";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
