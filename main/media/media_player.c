@@ -92,12 +92,16 @@ static void player_buf_evt_log(bool enter)
         return;
     }
     s_buf_last_log_us = now;
+    /* При низком CPU и частой буферизации узкое место — сеть/CDN, не декодер */
+    const char *hint = (s_buf_n_enter >= 5)
+        ? " [скорее сеть/CDN, не CPU — лучше SD + convert_movie]"
+        : "";
     if (enter) {
-        ESP_LOGI(TAG, "буферизация #%lu (готово #%lu; дальше не чаще 1 строки / 10 с)",
-                 (unsigned long)s_buf_n_enter, (unsigned long)s_buf_n_leave);
+        ESP_LOGW(TAG, "буферизация #%lu (готово #%lu)%s",
+                 (unsigned long)s_buf_n_enter, (unsigned long)s_buf_n_leave, hint);
     } else {
-        ESP_LOGI(TAG, "буфер готов #%lu (буферизация #%lu; дальше не чаще 1 строки / 10 с)",
-                 (unsigned long)s_buf_n_leave, (unsigned long)s_buf_n_enter);
+        ESP_LOGI(TAG, "буфер готов #%lu (буферизация #%lu)%s",
+                 (unsigned long)s_buf_n_leave, (unsigned long)s_buf_n_enter, hint);
     }
 }
 
@@ -464,17 +468,17 @@ static esp_err_t player_start(const char *url, bool video)
     }
     esp_player_set_event_cb(s_mp.player, player_event_cb, NULL);
 
-    /* Буферы под сеть + SW H.264 на P4 (нет HW decode).
-     * Espressif esp_player: P4 H.264 ≈ 320×240@68 / 640×480@18 — выше 360p
-     * почти всегда «slideshow». archive.org + TLS reconnect → нужен запас.
-     * (Журналы: E-HTTP-TLS-RECONNECT, E-PLAYBACK-SMOOTH.) */
+    /* Сеть archive.org — главный тормоз (CPU часто 15–20% при лагах).
+     * Нужен большой demux + HTTP read-ahead, чтобы переживать TLS reconnect
+     * и Read timeout без хлопанья вентиля. 8–10 с запаса в PSRAM.
+     * (E-PLAYBACK-SMOOTH: CPU низкий + buffering = сеть, не tinyh264.) */
     esp_player_buffer_config_t bcfg = {
-        .extractor_pool_size = 6 * 1024 * 1024, /* demux в PSRAM */
-        .http_read_buf_size  = 768 * 1024,      /* read-ahead HTTP */
-        .prebuffer_resume_ms = 2500,            /* дольше копить до PLAY */
-        .rebuffer_enter_ms   = 600,
-        .rebuffer_resume_ms  = 1800,
-        .rebuffer_grace_ms   = 350,
+        .extractor_pool_size = 8 * 1024 * 1024, /* ~8 МБ demux */
+        .http_read_buf_size  = 1024 * 1024,     /* 1 МБ HTTP */
+        .prebuffer_resume_ms = 4000,            /* копить дольше до PLAY */
+        .rebuffer_enter_ms   = 800,             /* не входить в buffering слишком рано */
+        .rebuffer_resume_ms  = 2500,            /* выходить только с запасом */
+        .rebuffer_grace_ms   = 400,
     };
     if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {
         ESP_LOGW(TAG, "переопределение buffer cfg не удалось, оставляем встроенные");
@@ -508,8 +512,8 @@ static esp_err_t player_start(const char *url, bool video)
     if (video) {
         /* P4: HW H.264 decode нет. Для плавности — SD + tools/convert_movie
          * (320×180@20 Baseline). Сеть 512×288 часто даёт buffering. */
-        ESP_LOGI(TAG, "подсказка: плавно = SD + convert_movie (320x180 Baseline); "
-                      "сеть 512x288 — на грани SW decode");
+        ESP_LOGW(TAG, "подсказка: если CPU низкий, а картинка рвётся — это сеть. "
+                      "Плавнее всего: SD + tools/convert_movie.sh … smooth (320x180)");
     }
     return ESP_OK;
 
