@@ -1897,15 +1897,7 @@ static void draw_screen(void)
         return;
     }
 
-    
-#if CONFIG_EB_WIFI_ENABLE
-        if (br.state == ST_WIFI) {
-            wifi_handle_tap(x, y);
-            draw_screen();
-            continue;
-        }
-#endif
-switch (br.state) {
+    switch (br.state) {
     case ST_SPLASH:   draw_splash(fb);       break;
     case ST_HOME:     draw_home(fb);         break;
     case ST_BUSY:     draw_busy_frame(fb);   break;
@@ -2036,6 +2028,14 @@ static void browser_task(void *arg)
         bool tap = touch_now && !prev_touch;    /* press-and-release edge */
 
         switch (br.state) {
+#if CONFIG_EB_WIFI_ENABLE
+        case ST_WIFI:
+            if (tap) {
+                wifi_handle_tap(tap_x, tap_y);
+                draw_screen();
+            }
+            break;
+#endif
         case ST_SPLASH:
             if (app_net_ready()) {
                 br.state = ST_HOME;
