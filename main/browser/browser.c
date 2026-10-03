@@ -27,6 +27,7 @@
 #include "app_lcd.h"
 #include "net/app_net.h"
 #include "net/speed_test.h"
+#include "net/wifi_mgr.h"
 #include "camos/ui.h"
 #include "camos/ui_icons.h"
 #include "camos/touch.h"
@@ -102,6 +103,12 @@ enum {
     BTN_FILEROW,            /* row = (y - SD_ROWS_Y0)/SD_ROW_STRIDE */
     BTN_STATION,            /* + 0..RADIO_STATIONS_N-1 */
     BTN_VIDPRESET,          /* + 0..VIDEO_PRESETS_N-1 */
+    BTN_WIFI,               /* экран Wi‑Fi менеджера */
+    BTN_WIFI_SCAN,
+    BTN_WIFI_PORTAL,
+    BTN_WIFI_TEST,
+    BTN_WIFI_CONN,          /* подключить сохранённую */
+    BTN_WIFI_ROW,           /* + index скан-сети */
     BTN_CHAR = 0x20,        /* ids >= BTN_CHAR are literal chars */
 };
 
@@ -122,6 +129,7 @@ typedef enum {
     ST_FILES,               /* media files on the SD card              */
     ST_FILMS,               /* keyboard: search the films catalog      */
     ST_FILMSR,              /* films search results                    */
+    ST_WIFI,                /* менеджер Wi‑Fi: скан / портал / тест     */
 #endif
 } browser_state_t;
 
@@ -607,6 +615,9 @@ static const ui_button_t home_apps[] = {
     { 20,  108, 320, 142, "РАДИО",  BTN_RADIO, 3 },
     { 352, 108, 320, 142, "ВИДЕО",  BTN_VIDEO, 3 },
     { 684, 108, 320, 142, "ФИЛЬМЫ", BTN_FILMS, 3 },
+#if CONFIG_EB_WIFI_ENABLE
+    { 20,  268, 320, 100, "Wi-Fi",  BTN_WIFI,  3 },
+#endif
 };
 #define HOME_APPS_N (sizeof(home_apps) / sizeof(home_apps[0]))
 
@@ -1129,6 +1140,136 @@ static void video_start_ui(const char *url)
     ESP_LOGW(TAG, "media_video_start failed");
     video_start_fail("плеер: не удалось запустить конвейер");
 }
+
+
+
+#if CONFIG_EB_WIFI_ENABLE
+/* --- Экран Wi‑Fi менеджера ------------------------------------------------ */
+
+static void draw_wifi(uint16_t *fb)
+{
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, LCD_H, UI_COLOR_BG);
+    draw_status_bar(fb);
+    ui_text(fb, LCD_W, LCD_H, 16, 56, "Wi-Fi (C6)", 2, UI_COLOR_FG, UI_COLOR_BG);
+
+    const char *st = wifi_mgr_status_str();
+    ui_text(fb, LCD_W, LCD_H, 16, 96, st, 1, UI_COLOR_DIM, UI_COLOR_BG);
+
+    char line[96];
+    if (wifi_mgr_saved_ssid()[0]) {
+        snprintf(line, sizeof(line), "NVS: %s", wifi_mgr_saved_ssid());
+        ui_text(fb, LCD_W, LCD_H, 16, 120, line, 1, UI_COLOR_DIM, UI_COLOR_BG);
+    }
+    if (wifi_mgr_ip_str()[0]) {
+        snprintf(line, sizeof(line), "IP: %s", wifi_mgr_ip_str());
+        ui_text(fb, LCD_W, LCD_H, 16, 144, line, 1, UI_COLOR_ACCENT, UI_COLOR_BG);
+    }
+
+    ui_button_t bscan   = { 16,  180, 220, 56, "СКАН",     BTN_WIFI_SCAN,   2 };
+    ui_button_t bconn   = { 250, 180, 260, 56, "ПОДКЛ NVS", BTN_WIFI_CONN,  2 };
+    ui_button_t bportal = { 524, 180, 220, 56, "ПОРТАЛ",   BTN_WIFI_PORTAL, 2 };
+    ui_button_t btest   = { 758, 180, 250, 56, "ТЕСТ NET", BTN_WIFI_TEST,  2 };
+    ui_button(fb, LCD_W, LCD_H, &bscan, false);
+    ui_button(fb, LCD_W, LCD_H, &bconn, false);
+    ui_button(fb, LCD_W, LCD_H, &bportal, false);
+    ui_button(fb, LCD_W, LCD_H, &btest, false);
+
+    ui_text(fb, LCD_W, LCD_H, 16, 250, "Сети (2.4 ГГц):", 1, UI_COLOR_FG, UI_COLOR_BG);
+    int n = wifi_mgr_scan_count();
+    int y = 280;
+    for (int i = 0; i < n && i < 6; i++) {
+        const wifi_mgr_ap_t *ap = wifi_mgr_scan_get(i);
+        if (!ap) break;
+        snprintf(line, sizeof(line), "%s  %ddBm%s",
+                 ap->ssid, (int)ap->rssi, ap->is_open ? " open" : "");
+        ui_button_t row = { 16, y, LCD_W - 32, 36, line, BTN_WIFI_ROW + i, 1 };
+        ui_button(fb, LCD_W, LCD_H, &row, false);
+        y += 40;
+    }
+    if (n == 0) {
+        ui_text(fb, LCD_W, LCD_H, 16, 280, "Нажмите СКАН", 1, UI_COLOR_DIM, UI_COLOR_BG);
+    }
+
+    ui_button_t home = { 8, LCD_H - 60, 180, 56, "МЕНЮ", BTN_HOME, 0 };
+    ui_button(fb, LCD_W, LCD_H, &home, false);
+}
+
+static void wifi_handle_tap(int x, int y)
+{
+    ui_button_t bscan   = { 16,  180, 220, 56, "СКАН",     BTN_WIFI_SCAN,   2 };
+    ui_button_t bconn   = { 250, 180, 260, 56, "ПОДКЛ NVS", BTN_WIFI_CONN,  2 };
+    ui_button_t bportal = { 524, 180, 220, 56, "ПОРТАЛ",   BTN_WIFI_PORTAL, 2 };
+    ui_button_t btest   = { 758, 180, 250, 56, "ТЕСТ NET", BTN_WIFI_TEST,  2 };
+    ui_button_t home = { 8, LCD_H - 60, 180, 56, "МЕНЮ", BTN_HOME, 0 };
+
+    if (ui_button_hit(&home, x, y)) {
+        br.state = ST_HOME;
+        return;
+    }
+    if (ui_button_hit(&bscan, x, y)) {
+        busy_open("Wi-Fi");
+        busy_stage("скан...");
+        wifi_mgr_scan();
+        busy_close();
+        return;
+    }
+    if (ui_button_hit(&bconn, x, y)) {
+        const char *ssid = wifi_mgr_saved_ssid();
+        busy_open("Wi-Fi");
+        if (!ssid[0]) {
+            busy_stage("нет SSID в NVS");
+            vTaskDelay(pdMS_TO_TICKS(900));
+        } else {
+            busy_stage("подключение...");
+            wifi_mgr_connect(ssid, NULL);
+        }
+        busy_close();
+        return;
+    }
+    if (ui_button_hit(&bportal, x, y)) {
+        busy_open("Портал");
+        busy_stage("CamBrowser-Setup");
+        wifi_mgr_start_portal();
+        busy_stage("192.168.4.1:8080");
+        vTaskDelay(pdMS_TO_TICKS(1200));
+        busy_close();
+        return;
+    }
+    if (ui_button_hit(&btest, x, y)) {
+        busy_open("Тест сети");
+        busy_stage("generate_204...");
+        wifi_mgr_test_t tr;
+        wifi_mgr_test_internet(&tr);
+        busy_stage(tr.note);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        busy_close();
+        return;
+    }
+    int n = wifi_mgr_scan_count();
+    int y0 = 280;
+    for (int i = 0; i < n && i < 6; i++) {
+        ui_button_t row = { 16, y0 + i * 40, LCD_W - 32, 36, "", BTN_WIFI_ROW + i, 1 };
+        if (ui_button_hit(&row, x, y)) {
+            const wifi_mgr_ap_t *ap = wifi_mgr_scan_get(i);
+            busy_open("Сеть");
+            if (ap) {
+                busy_stage(ap->ssid);
+                if (ap->is_open) {
+                    wifi_mgr_connect(ap->ssid, "");
+                } else {
+                    busy_stage("пароль -> ПОРТАЛ");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+            }
+            busy_close();
+            return;
+        }
+    }
+}
+#endif /* CONFIG_EB_WIFI_ENABLE */
+
+
+
 
 /* GO pressed on the URL-input screen (or the keyboard GO): apply the URL */
 static void urlin_apply(void)
@@ -1756,7 +1897,15 @@ static void draw_screen(void)
         return;
     }
 
-    switch (br.state) {
+    
+#if CONFIG_EB_WIFI_ENABLE
+        if (br.state == ST_WIFI) {
+            wifi_handle_tap(x, y);
+            draw_screen();
+            continue;
+        }
+#endif
+switch (br.state) {
     case ST_SPLASH:   draw_splash(fb);       break;
     case ST_HOME:     draw_home(fb);         break;
     case ST_BUSY:     draw_busy_frame(fb);   break;
@@ -1770,6 +1919,11 @@ static void draw_screen(void)
     case ST_URLIN:    draw_urlin(fb);        break;
     case ST_FILES:    draw_files(fb);        break;
     case ST_FILMS:    draw_films(fb);        break;
+    case ST_WIFI:
+#if CONFIG_EB_WIFI_ENABLE
+        draw_wifi(fb);
+        break;
+#endif
     case ST_FILMSR:   draw_filmsr(fb);       break;
     case ST_VIDEOP:   /* render owns the panel - nothing to draw */ break;
 #endif
@@ -1915,6 +2069,11 @@ static void browser_task(void *arg)
                 } else {
                     switch (id) {
 #if CONFIG_EB_MEDIA_ENABLE
+#if CONFIG_EB_WIFI_ENABLE
+                    case BTN_WIFI:
+                        br.state = ST_WIFI;
+                        break;
+#endif
                     case BTN_RADIO:
                         br.state = ST_RADIO;
                         draw_screen();
