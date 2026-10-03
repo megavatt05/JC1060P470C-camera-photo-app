@@ -5,26 +5,30 @@ on:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   build_firmware:
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.3
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: recursive
 
-      - name: Set Target Chip to ESP32-P4
-        run: idf.py set-target esp32p4
-
-      - name: Build Project
-        run: idf.py build
+      # Официальный action Espressif: Docker image + export.sh + idf.py
+      # (ручной container: без source export.sh и git safe.directory
+      #  часто падает там, где локальная VS Code / IDF 6.0.3 собирается).
+      - name: Build (ESP-IDF v6.0.3, target esp32p4)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0.3
+          target: esp32p4
+          path: .
 
       - name: Upload Artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: esp32p4-binaries
@@ -32,3 +36,4 @@ jobs:
             build/*.bin
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
+          if-no-files-found: warn
