@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -59,7 +61,7 @@ esp_err_t web_get(const char *url, const char *extra_cookie,
         .method = HTTP_METHOD_GET,
         .buffer_size = 4096,
         .buffer_size_tx = 2048,
-        .timeout_ms = 15000,
+        .timeout_ms = 20000,
         .max_redirection_count = 10,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = false,
@@ -78,7 +80,13 @@ esp_err_t web_get(const char *url, const char *extra_cookie,
         esp_http_client_set_header(client, "Cookie", extra_cookie);
     }
 
+    /* один повтор: на Wi‑Fi (esp_hosted) первый TLS handshake иногда рвётся (-0x50) */
     esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "open %s failed: %s — повтор...", url, esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(300));
+        err = esp_http_client_open(client, 0);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "open %s failed: %s", url, esp_err_to_name(err));
         esp_http_client_cleanup(client);
