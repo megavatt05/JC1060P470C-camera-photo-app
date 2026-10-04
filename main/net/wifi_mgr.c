@@ -469,8 +469,11 @@ static esp_err_t http_post_save(httpd_req_t *req)
         "</body></html>");
 
     if (ssid[0]) {
+        ESP_LOGI(TAG, "портал: принят SSID=\"%s\" pass_len=%u", ssid, (unsigned)strlen(pass));
         wifi_mgr_stop_portal();
         wifi_mgr_connect(ssid, pass);
+    } else {
+        ESP_LOGW(TAG, "портал POST: пустой SSID");
     }
     return ESP_OK;
 }
@@ -492,6 +495,14 @@ esp_err_t wifi_mgr_start_portal(void)
 #else
     ESP_ERROR_CHECK(stack_init());
     M.do_connect = false;
+
+    /* уже в режиме портала — не дёргать AP повторно (иначе телефон отваливается) */
+    if (M.state == WIFI_MGR_AP_MODE && M.httpd) {
+        ESP_LOGI(TAG, "портал уже активен → http://192.168.4.1  SSID_form=%s",
+                 M.portal_ssid[0] ? M.portal_ssid : "(пусто)");
+        status_set("http://192.168.4.1");
+        return ESP_OK;
+    }
 
     /* порт 80: останавливаем log_server, иначе httpd_start fail */
     log_server_stop();
