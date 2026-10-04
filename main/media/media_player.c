@@ -80,6 +80,19 @@ static struct {
 static uint32_t s_buf_n_enter, s_buf_n_leave;
 static int64_t s_buf_last_log_us = -10000000;
 
+/* метка времени этапа (мкс) для логов радио/видео */
+static int64_t s_stage_t0;
+
+static uint32_t stage_ms(void)
+{
+    return (uint32_t)((esp_timer_get_time() - s_stage_t0) / 1000ULL);
+}
+
+static void stage_log(const char *step)
+{
+    ESP_LOGI(TAG, "[%lu мс] этап: %s", (unsigned long)stage_ms(), step);
+}
+
 static void player_buf_evt_log(bool enter)
 {
     int64_t now = esp_timer_get_time();
@@ -119,11 +132,12 @@ static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
     switch (msg->event_type) {
     case ESP_PLAYER_EVENT_PLAYED:
         s_mp.state = MEDIA_STATE_PLAYING;
-        ESP_LOGI(TAG, "играет");
+        ESP_LOGI(TAG, "[%lu мс] этап: PLAYING (звук/картинка идут) url=%s",
+                 (unsigned long)stage_ms(), s_mp.url);
         break;
     case ESP_PLAYER_EVENT_PAUSED:
         s_mp.state = MEDIA_STATE_PAUSED;
-        ESP_LOGI(TAG, "пауза");
+        ESP_LOGI(TAG, "[%lu мс] этап: PAUSE", (unsigned long)stage_ms());
         break;
     case ESP_PLAYER_EVENT_BUFFERING:
         player_buf_evt_log(true);
@@ -132,14 +146,16 @@ static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
         player_buf_evt_log(false);
         break;
     case ESP_PLAYER_EVENT_AUDIO_INFO_PARSED:
-        ESP_LOGI(TAG, "аудиодорожка разобрана");
+        ESP_LOGI(TAG, "[%lu мс] этап: аудио трек разобран (декодер готов)",
+                 (unsigned long)stage_ms());
         break;
     case ESP_PLAYER_EVENT_VIDEO_INFO_PARSED:
-        ESP_LOGI(TAG, "видеодорожка разобрана");
+        ESP_LOGI(TAG, "[%lu мс] этап: видео трек разобран (декодер готов)",
+                 (unsigned long)stage_ms());
         break;
     case ESP_PLAYER_EVENT_FINISHED:
         s_mp.state = MEDIA_STATE_FINISHED;
-        ESP_LOGI(TAG, "конец");
+        ESP_LOGI(TAG, "[%lu мс] этап: КОНЕЦ потока", (unsigned long)stage_ms());
         break;
     case ESP_PLAYER_EVENT_STOPPED:
         /* teardown делает media_stop(); idle только если плеер
@@ -147,18 +163,24 @@ static esp_player_err_t player_event_cb(esp_player_event_msg_t *msg, void *ctx)
         if (s_mp.state == MEDIA_STATE_PLAYING || s_mp.state == MEDIA_STATE_CONNECTING) {
             s_mp.state = MEDIA_STATE_FINISHED;
         }
-        ESP_LOGI(TAG, "остановлен");
+        ESP_LOGI(TAG, "[%lu мс] этап: STOP (остановили или сменили станцию)",
+                 (unsigned long)stage_ms());
         break;
     case ESP_PLAYER_EVENT_ERROR:
         s_mp.state = MEDIA_STATE_ERROR;
         if (msg->data != NULL) {
-            ESP_LOGE(TAG, "ошибка воспроизведения, source=%d",
-                     (int)*(esp_player_error_source_t *)msg->data);
+            ESP_LOGE(TAG, "[%lu мс] этап: ОШИБКА source=%d url=%s",
+                     (unsigned long)stage_ms(),
+                     (int)*(esp_player_error_source_t *)msg->data,
+                     s_mp.url);
         } else {
-            ESP_LOGE(TAG, "ошибка воспроизведения");
+            ESP_LOGE(TAG, "[%lu мс] этап: ОШИБКА (без source) url=%s",
+                     (unsigned long)stage_ms(), s_mp.url);
         }
         break;
     default:
+        ESP_LOGD(TAG, "[%lu мс] player event type=%d",
+                 (unsigned long)stage_ms(), (int)msg->event_type);
         break;
     }
     return ESP_PLAYER_ERR_OK;
@@ -439,33 +461,43 @@ static void player_teardown(void)
 static esp_err_t player_start(const char *url, bool video)
 {
     /* остановить и разобрать всё, что сейчас играет */
+    s_stage_t0 = esp_timer_get_time();
+    ESP_LOGI(TAG, "[0 мс] этап: ЗАПРОС %s", video ? "видео" : "радио");
+    ESP_LOGI(TAG, "[0 мс] URL: %s", url ? url : "(null)");
+
     player_teardown();
+    stage_log("после teardown предыдущего");
     s_mp.state = MEDIA_STATE_CONNECTING;
     s_mp.mode_video = video;
     strlcpy(s_mp.url, url, sizeof(s_mp.url));
 
     esp_err_t err = create_audio_render();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "настройка аудиорендера не удалась");
+        ESP_LOGE(TAG, "[%lu мс] этап: FAIL аудиорендер (%s)",
+                 (unsigned long)stage_ms(), esp_err_to_name(err));
         goto fail;
     }
+    stage_log("аудиорендер OK");
     if (video) {
         err = create_video_render();
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "настройка видеорендера не удалась");
+            ESP_LOGE(TAG, "[%lu мс] этап: FAIL видеорендер (%s)",
+                     (unsigned long)stage_ms(), esp_err_to_name(err));
             goto fail;
         }
         /* рендер теперь владеет frame buffer'ами панели */
         s_mp.video_active = true;
+        stage_log("видеорендер OK");
     }
 
     esp_player_config_t pcfg = ESP_PLAYER_CONFIG_DEFAULT();
     pcfg.audio_render_hd = s_mp.audio_stream;
     pcfg.video_render_hd = video ? s_mp.video_render : NULL;
     if (esp_player_init(&pcfg, &s_mp.player) != ESP_PLAYER_ERR_OK) {
-        ESP_LOGE(TAG, "esp_player_init не удался");
+        ESP_LOGE(TAG, "[%lu мс] этап: FAIL esp_player_init", (unsigned long)stage_ms());
         goto fail;
     }
+    stage_log("esp_player_init OK");
     esp_player_set_event_cb(s_mp.player, player_event_cb, NULL);
 
     /* Сеть archive.org — главный тормоз (CPU часто 15–20% при лагах).
@@ -502,13 +534,22 @@ static esp_err_t player_start(const char *url, bool video)
 
     esp_player_data_src_t src = ESP_PLAYER_DATA_SRC(s_mp.url,
                                        video ? ESP_PLAYER_MASK_AV : ESP_PLAYER_MASK_AUDIO);
-    if (esp_player_set_data_src(s_mp.player, &src) != ESP_PLAYER_ERR_OK ||
-        esp_player_run(s_mp.player) != ESP_PLAYER_ERR_OK) {
-        ESP_LOGE(TAG, "старт плеера не удался");
+    stage_log("буферы/задачи настроены, set_data_src...");
+    if (esp_player_set_data_src(s_mp.player, &src) != ESP_PLAYER_ERR_OK) {
+        ESP_LOGE(TAG, "[%lu мс] этап: FAIL set_data_src (URL/схема)",
+                 (unsigned long)stage_ms());
+        goto fail;
+    }
+    stage_log("set_data_src OK, esp_player_run (HTTP/DNS)...");
+    if (esp_player_run(s_mp.player) != ESP_PLAYER_ERR_OK) {
+        ESP_LOGE(TAG, "[%lu мс] этап: FAIL esp_player_run",
+                 (unsigned long)stage_ms());
         goto fail;
     }
 
-    ESP_LOGI(TAG, "старт %s: %s", video ? "видео" : "радио", url);
+    ESP_LOGI(TAG, "[%lu мс] этап: PIPELINE запущен, ждём сеть/трек — %s",
+             (unsigned long)stage_ms(), video ? "видео" : "радио");
+    ESP_LOGI(TAG, "URL: %s", url);
     if (video) {
         /* P4: HW H.264 decode нет. Для плавности — SD + tools/convert_movie
          * (320×180@20 Baseline). Сеть 512×288 часто даёт buffering. */
@@ -518,6 +559,7 @@ static esp_err_t player_start(const char *url, bool video)
     return ESP_OK;
 
 fail:
+    ESP_LOGE(TAG, "[%lu мс] этап: СБОЙ старта, teardown", (unsigned long)stage_ms());
     player_teardown();
     s_mp.url[0] = '\0';
     s_mp.state = MEDIA_STATE_ERROR;
@@ -617,10 +659,13 @@ esp_err_t media_player_init(void)
 esp_err_t media_radio_start(const char *url)
 {
     if (url == NULL || url[0] == '\0') {
+        ESP_LOGE(TAG, "radio: пустой URL");
         return ESP_ERR_INVALID_ARG;
     }
+    ESP_LOGI(TAG, "radio: запрос старта");
     esp_err_t err = media_player_init();
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "radio: media_player_init fail %s", esp_err_to_name(err));
         return err;
     }
     return player_start(url, false);
@@ -640,6 +685,7 @@ esp_err_t media_video_start(const char *url)
 
 void media_stop(void)
 {
+    ESP_LOGI(TAG, "[%lu мс] этап: media_stop()", (unsigned long)stage_ms());
     player_teardown();
     s_mp.state = MEDIA_STATE_IDLE;
 }
