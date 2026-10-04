@@ -1493,7 +1493,9 @@ static void draw_splash(uint16_t *fb)
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(st, UI_SCALE_TEXT)) / 2,
             392, st, UI_SCALE_TEXT, UI_COLOR_FG, UI_COLOR_BG);
 
-    const char *hint = app_net_ready() ? "запуск..." : "подключите Ethernet или Wi-Fi";
+    const char *hint = app_net_ready()
+        ? "запуск..."
+        : "тап или подождите — Wi-Fi в меню HOME";
     ui_text(fb, LCD_W, LCD_H, (LCD_W - ui_text_width(hint, UI_SCALE_TEXT)) / 2,
             424, hint, UI_SCALE_TEXT, UI_COLOR_BORDER, UI_COLOR_BG);
 }
@@ -2055,15 +2057,19 @@ static void browser_task(void *arg)
             break;
 #endif
         case ST_SPLASH:
-            if (app_net_ready()) {
+            /* HOME и Wi‑Fi доступны БЕЗ Ethernet/IP — иначе нельзя открыть портал */
+            if (tap || app_net_ready() ||
+                (esp_timer_get_time() - splash_start > 1500000LL)) {
                 br.state = ST_HOME;
                 draw_screen();
-            } else if (esp_timer_get_time() - splash_start > 1000000LL) {
-                splash_start = esp_timer_get_time();
-                draw_screen();  /* refresh the status line */
-            } else if (tap && !app_net_ready()) {
-                /* tap during splash = retry immediately (no-op until net) */
-                splash_start = 0;
+            } else if (esp_timer_get_time() - splash_start > 400000LL) {
+                /* периодически обновляем статус сети на splash */
+                static int64_t last_redraw;
+                int64_t now = esp_timer_get_time();
+                if (now - last_redraw > 400000LL) {
+                    last_redraw = now;
+                    draw_screen();
+                }
             }
             break;
 
