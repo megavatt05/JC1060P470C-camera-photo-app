@@ -363,61 +363,38 @@ esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
 /* ---- SoftAP + HTTP ------------------------------------------------------ */
 
 
-/* HTML страница настройки (порт 80 → только http://192.168.4.1) */
-static const char *PORTAL_HTML =
-    "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-    "<title>CamBrowser Wi-Fi</title>"
-    "<style>"
-    "body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;"
-    "margin:0;padding:24px;line-height:1.4}"
-    "h1{color:#58a6ff;font-size:1.6rem;margin:0 0 8px}"
-    "p{color:#8b949e;margin:0 0 16px}"
-    "label{display:block;margin:12px 0 4px;color:#c9d1d9}"
-    "input{width:100%;max-width:360px;box-sizing:border-box;padding:12px;font-size:16px;"
-    "border-radius:8px;border:1px solid #30363d;background:#161b22;color:#e6edf3}"
-    "button{margin-top:16px;padding:12px 20px;font-size:16px;border:0;border-radius:8px;"
-    "background:#238636;color:#fff;width:100%;max-width:360px}"
-    "</style></head><body>"
-    "<h1>Настройка Wi-Fi</h1>"
-    "<p>CamBrowser · только сеть <b>2.4&nbsp;ГГц</b></p>"
-    "<form method=\"POST\" action=\"/save\">"
-    "<label>Имя сети (SSID)</label>"
-    "<input name=\"ssid\" required maxlength=\"32\" autocomplete=\"username\" placeholder=\"например ufanet30\">"
-    "<label>Пароль</label>"
-    "<input name=\"pass\" type=\"password\" maxlength=\"64\" autocomplete=\"current-password\">"
-    "<button type=\"submit\">Сохранить и подключить</button>"
-    "</form>"
-    "<p style=\"margin-top:24px;font-size:0.9rem\">После сохранения плата уйдёт в вашу сеть.</p>"
-    "</body></html>";
 
+/* HTML страница настройки (порт 80 → http://192.168.4.1/) */
 static esp_err_t http_send_portal(httpd_req_t *req)
 {
-    /* динамическая форма: SSID из выбранной сети на LCD */
-    char page[1600];
+    char page[1400];
     const char *pre = M.portal_ssid[0] ? M.portal_ssid : "";
+    /* без вложенных " внутри C-строки — charset=utf-8 без кавычек в HTML */
     snprintf(page, sizeof(page),
-        "<!DOCTYPE html><html><head><meta charset="utf-8">"
-        "<meta name="viewport" content="width=device-width,initial-scale=1">"
+        "<!DOCTYPE html><html><head><meta charset=utf-8>"
+        "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
         "<title>CamBrowser Wi-Fi</title>"
         "<style>"
-        "body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:24px}"
-        "h1{color:#58a6ff}input,button{display:block;width:100%%;max-width:360px;box-sizing:border-box;"
+        "body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;"
+        "margin:0;padding:24px}"
+        "h1{color:#58a6ff}"
+        "input,button{display:block;width:100%%;max-width:360px;box-sizing:border-box;"
         "padding:12px;margin:8px 0;font-size:16px;border-radius:8px}"
         "input{border:1px solid #30363d;background:#161b22;color:#e6edf3}"
         "button{background:#238636;color:#fff;border:0}"
         "</style></head><body>"
         "<h1>Настройка Wi-Fi</h1>"
         "<p>Только <b>2.4 ГГц</b>. Введите пароль сети.</p>"
-        "<form method="POST" action="/save">"
+        "<form method=POST action=/save>"
         "<label>SSID</label>"
-        "<input name="ssid" required maxlength="32" value="%s">"
+        "<input name=ssid required maxlength=32 value=\"%s\">"
         "<label>Пароль</label>"
-        "<input name="pass" type="password" maxlength="64" autofocus>"
-        "<button type="submit">Сохранить и подключить</button>"
+        "<input name=pass type=password maxlength=64 autofocus>"
+        "<button type=submit>Сохранить и подключить</button>"
         "</form></body></html>",
         pre);
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
+
+    httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
