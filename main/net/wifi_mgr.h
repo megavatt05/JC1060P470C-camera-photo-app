@@ -64,6 +64,8 @@ const wifi_mgr_ap_t *wifi_mgr_scan_get(int index);
 esp_err_t wifi_mgr_connect(const char *ssid, const char *password);
 
 esp_err_t wifi_mgr_start_portal(void);
+/** Портал с уже выбранным SSID (пароль вводят на телефоне). */
+esp_err_t wifi_mgr_start_portal_ssid(const char *ssid);
 esp_err_t wifi_mgr_stop_portal(void);
 
 esp_err_t wifi_mgr_test_internet(wifi_mgr_test_t *out);
