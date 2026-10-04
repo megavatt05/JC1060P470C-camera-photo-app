@@ -153,6 +153,19 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         M.state = WIFI_MGR_CONNECTED;
         status_set("есть IP");
         ESP_LOGI(TAG, "IP %s", M.ip);
+        {
+            wifi_ap_record_t ap = {0};
+            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                ESP_LOGI(TAG, "AP: %.32s ch=%d rssi=%d auth=%d",
+                         (const char *)ap.ssid, ap.primary, ap.rssi, (int)ap.authmode);
+                ESP_LOGD(TAG, "AP bssid=%02x:%02x:%02x:%02x:%02x:%02x",
+                         ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                         ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+            } else {
+                ESP_LOGD(TAG, "sta_get_ap_info не удалось");
+            }
+            ESP_LOGD(TAG, "default_netif=STA после GOT_IP");
+        }
         if (M.netif_sta) {
             esp_netif_set_default_netif(M.netif_sta);
         }
@@ -194,6 +207,12 @@ static esp_err_t stack_init(void)
     if (!wifi_ok) {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+        /* глубже INFO: wifi_mgr + типичные TAG hosted/Wi-Fi */
+        esp_log_level_set("wifi_mgr", ESP_LOG_DEBUG);
+        esp_log_level_set("wifi", ESP_LOG_DEBUG);
+        esp_log_level_set("esp_wifi_remote", ESP_LOG_DEBUG);
+        esp_log_level_set("eh_wifi", ESP_LOG_INFO);
+        ESP_LOGD(TAG, "stack: esp_wifi_init OK, log=DEBUG");
         ESP_ERROR_CHECK(esp_event_handler_instance_register(
             WIFI_EVENT, ESP_EVENT_ANY_ID, &on_event, NULL, NULL));
         ESP_ERROR_CHECK(esp_event_handler_instance_register(
@@ -268,6 +287,7 @@ esp_err_t wifi_mgr_scan(void)
 
     wifi_scan_config_t sc = { 0 };
     sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    ESP_LOGD(TAG, "scan_start show_hidden=%d", (int)sc.show_hidden);
     if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
         status_set("скан ошибка");
         M.state = WIFI_MGR_FAIL;
@@ -335,14 +355,21 @@ esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
     }
     cfg.sta.threshold.authmode = (pw && pw[0]) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
+    ESP_LOGD(TAG, "connect: set_mode STA, ssid_len=%u pass_len=%u",
+             (unsigned)strlen((char *)cfg.sta.ssid),
+             (unsigned)strlen((char *)cfg.sta.password));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     esp_err_t e = esp_wifi_start();
+    ESP_LOGD(TAG, "esp_wifi_start -> %s", esp_err_to_name(e));
     if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
         status_set("start fail");
         return e;
     }
-    esp_wifi_connect(); /* если STA уже был START */
+    {
+        esp_err_t ce = esp_wifi_connect();
+        ESP_LOGD(TAG, "esp_wifi_connect -> %s", esp_err_to_name(ce));
+    }
 
     EventBits_t bits = xEventGroupWaitBits(
         M.events, BIT_OK | BIT_FAIL, pdTRUE, pdFALSE,
