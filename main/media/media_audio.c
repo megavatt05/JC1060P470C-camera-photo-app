@@ -55,7 +55,7 @@ static struct {
     int  fade_total;                    /* fade-in length in frames */
     int  fade_left;                     /* frames still to fade */
     int volume;
-} s_au = { .volume = 70 };
+} s_au = { .volume = 10 }; /* 10% по умолчанию */
 
 static esp_err_t au_i2s_channel_create(void)
 {
