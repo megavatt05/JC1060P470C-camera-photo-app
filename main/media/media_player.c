@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -79,6 +80,9 @@ static struct {
  * кормит СТОПЫ/БУФЕРИЗАЦИЯ на OSD; в UART — одна сводка раз в 10 с. */
 static uint32_t s_buf_n_enter, s_buf_n_leave;
 static int64_t s_buf_last_log_us = -10000000;
+
+/* один старт за раз — иначе STOP+run гоняются и рвут сокет */
+static SemaphoreHandle_t s_play_mu;
 
 /* метка времени этапа (мкс) для логов радио/видео */
 static int64_t s_stage_t0;
@@ -504,13 +508,14 @@ static esp_err_t player_start(const char *url, bool video)
      * Нужен большой demux + HTTP read-ahead, чтобы переживать TLS reconnect
      * и Read timeout без хлопанья вентиля. 8–10 с запаса в PSRAM.
      * (E-PLAYBACK-SMOOTH: CPU низкий + buffering = сеть, не tinyh264.) */
+    /* Сеть через C6/SDIO: больше read-ahead, дольше prebuffer — меньше stall */
     esp_player_buffer_config_t bcfg = {
         .extractor_pool_size = 8 * 1024 * 1024, /* ~8 МБ demux */
-        .http_read_buf_size  = 1024 * 1024,     /* 1 МБ HTTP */
-        .prebuffer_resume_ms = 4000,            /* копить дольше до PLAY */
-        .rebuffer_enter_ms   = 800,             /* не входить в buffering слишком рано */
-        .rebuffer_resume_ms  = 2500,            /* выходить только с запасом */
-        .rebuffer_grace_ms   = 400,
+        .http_read_buf_size  = 1536 * 1024,     /* 1.5 МБ HTTP */
+        .prebuffer_resume_ms = 6000,            /* дольше копить до PLAY */
+        .rebuffer_enter_ms   = 1200,
+        .rebuffer_resume_ms  = 3500,
+        .rebuffer_grace_ms   = 600,
     };
     if (esp_player_set_buffer_config(s_mp.player, &bcfg) != ESP_PLAYER_ERR_OK) {
         ESP_LOGW(TAG, "переопределение buffer cfg не удалось, оставляем встроенные");
@@ -525,8 +530,8 @@ static esp_err_t player_start(const char *url, bool video)
      * чтобы не отбирать кванты у tinyh264. (E-PLAYBACK-SMOOTH) */
     esp_player_task_config_t tcfg = {
         .extractor     = { .stack = 8192, .prio = 5, .core = 0, .stack_in_ext = 1 },
-        .audio_decoder = { .stack = 6144, .prio = 5, .core = 1, .stack_in_ext = 1 },
-        .audio_render  = { .stack = 6144, .prio = 5, .core = 0, .stack_in_ext = 0 },
+        .audio_decoder = { .stack = 8192, .prio = 6, .core = 1, .stack_in_ext = 1 },
+        .audio_render  = { .stack = 8192, .prio = 6, .core = 0, .stack_in_ext = 0 },
         .video_decoder = { .stack = 12288, .prio = 6, .core = 1, .stack_in_ext = 1 },
         .video_render  = { .stack = 8192, .prio = 5, .core = 0, .stack_in_ext = 0 },
     };
@@ -656,6 +661,24 @@ esp_err_t media_player_init(void)
     return ESP_OK;
 }
 
+static esp_err_t start_locked(const char *url, bool video)
+{
+    if (s_play_mu == NULL) {
+        s_play_mu = xSemaphoreCreateMutex();
+    }
+    if (s_play_mu == NULL) {
+        return player_start(url, video);
+    }
+    /* не стакаем запуски: ждём до 15 с завершения предыдущего teardown/start */
+    if (xSemaphoreTake(s_play_mu, pdMS_TO_TICKS(15000)) != pdTRUE) {
+        ESP_LOGW(TAG, "старт занят >15с, отклоняем новый URL");
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = player_start(url, video);
+    xSemaphoreGive(s_play_mu);
+    return err;
+}
+
 esp_err_t media_radio_start(const char *url)
 {
     if (url == NULL || url[0] == '\0') {
@@ -668,7 +691,7 @@ esp_err_t media_radio_start(const char *url)
         ESP_LOGE(TAG, "radio: media_player_init fail %s", esp_err_to_name(err));
         return err;
     }
-    return player_start(url, false);
+    return start_locked(url, false);
 }
 
 esp_err_t media_video_start(const char *url)
@@ -676,11 +699,12 @@ esp_err_t media_video_start(const char *url)
     if (url == NULL || url[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
+    ESP_LOGI(TAG, "video: запрос старта");
     esp_err_t err = media_player_init();
     if (err != ESP_OK) {
         return err;
     }
-    return player_start(url, true);
+    return start_locked(url, true);
 }
 
 void media_stop(void)
