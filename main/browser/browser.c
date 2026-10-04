@@ -1185,20 +1185,21 @@ static void draw_wifi(uint16_t *fb)
     ui_button(fb, LCD_W, LCD_H, &bportal, false);
     ui_button(fb, LCD_W, LCD_H, &btest, false);
 
-    ui_text(fb, LCD_W, LCD_H, 16, 250, "Сети (2.4 ГГц):", 1, UI_COLOR_FG, UI_COLOR_BG);
+    /* Шрифт сетей: scale 2 (1024×600 — scale 1 слишком мелкий) */
+    ui_text(fb, LCD_W, LCD_H, 16, 248, "Сети (2.4 ГГц):", 2, UI_COLOR_FG, UI_COLOR_BG);
     int n = wifi_mgr_scan_count();
-    int y = 280;
-    for (int i = 0; i < n && i < 6; i++) {
+    int y = 288;
+    for (int i = 0; i < n && i < 5; i++) {
         const wifi_mgr_ap_t *ap = wifi_mgr_scan_get(i);
         if (!ap) break;
         snprintf(line, sizeof(line), "%s  %ddBm%s",
                  ap->ssid, (int)ap->rssi, ap->is_open ? " open" : "");
-        ui_button_t row = { 16, y, LCD_W - 32, 36, line, BTN_WIFI_ROW + i, 1 };
+        ui_button_t row = { 16, y, LCD_W - 32, 48, line, BTN_WIFI_ROW + i, 2 };
         ui_button(fb, LCD_W, LCD_H, &row, false);
-        y += 40;
+        y += 52;
     }
     if (n == 0) {
-        ui_text(fb, LCD_W, LCD_H, 16, 280, "Нажмите СКАН", 1, UI_COLOR_DIM, UI_COLOR_BG);
+        ui_text(fb, LCD_W, LCD_H, 16, 300, "Нажмите СКАН", 2, UI_COLOR_DIM, UI_COLOR_BG);
     }
 
     ui_button_t home = { 8, LCD_H - 60, 180, 56, "МЕНЮ", BTN_HOME, 0 };
@@ -1241,7 +1242,7 @@ static void wifi_handle_tap(int x, int y)
         busy_open("Портал");
         busy_stage("CamBrowser-Setup");
         wifi_mgr_start_portal();
-        busy_stage("192.168.4.1:8080");
+        busy_stage("192.168.4.1");
         vTaskDelay(pdMS_TO_TICKS(1200));
         busy_close();
         return;
@@ -1259,7 +1260,7 @@ static void wifi_handle_tap(int x, int y)
     int n = wifi_mgr_scan_count();
     int y0 = 280;
     for (int i = 0; i < n && i < 6; i++) {
-        ui_button_t row = { 16, y0 + i * 40, LCD_W - 32, 36, "", BTN_WIFI_ROW + i, 1 };
+        ui_button_t row = { 16, y0 + i * 52, LCD_W - 32, 48, "", BTN_WIFI_ROW + i, 2 };
         if (ui_button_hit(&row, x, y)) {
             const wifi_mgr_ap_t *ap = wifi_mgr_scan_get(i);
             busy_open("Сеть");
