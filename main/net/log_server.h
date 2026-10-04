@@ -20,6 +20,9 @@ extern "C" {
  *         http://<board-ip>/log. Idempotent. */
 esp_err_t log_server_start(void);
 
+/** Остановить HTTP (освободить порт 80 под SoftAP-портал). */
+esp_err_t log_server_stop(void);
+
 #ifdef __cplusplus
 }
 #endif
