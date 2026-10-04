@@ -60,6 +60,7 @@ typedef struct {
     esp_netif_t         *netif_sta;
     esp_netif_t         *netif_ap;
     httpd_handle_t       httpd;
+    char                 portal_ssid[WIFI_MGR_SSID_MAX + 1];
 } mgr_t;
 
 static mgr_t M;
@@ -392,9 +393,33 @@ static const char *PORTAL_HTML =
 
 static esp_err_t http_send_portal(httpd_req_t *req)
 {
+    /* динамическая форма: SSID из выбранной сети на LCD */
+    char page[1600];
+    const char *pre = M.portal_ssid[0] ? M.portal_ssid : "";
+    snprintf(page, sizeof(page),
+        "<!DOCTYPE html><html><head><meta charset="utf-8">"
+        "<meta name="viewport" content="width=device-width,initial-scale=1">"
+        "<title>CamBrowser Wi-Fi</title>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:24px}"
+        "h1{color:#58a6ff}input,button{display:block;width:100%%;max-width:360px;box-sizing:border-box;"
+        "padding:12px;margin:8px 0;font-size:16px;border-radius:8px}"
+        "input{border:1px solid #30363d;background:#161b22;color:#e6edf3}"
+        "button{background:#238636;color:#fff;border:0}"
+        "</style></head><body>"
+        "<h1>Настройка Wi-Fi</h1>"
+        "<p>Только <b>2.4 ГГц</b>. Введите пароль сети.</p>"
+        "<form method="POST" action="/save">"
+        "<label>SSID</label>"
+        "<input name="ssid" required maxlength="32" value="%s">"
+        "<label>Пароль</label>"
+        "<input name="pass" type="password" maxlength="64" autofocus>"
+        "<button type="submit">Сохранить и подключить</button>"
+        "</form></body></html>",
+        pre);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    return httpd_resp_send(req, PORTAL_HTML, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t http_get_root(httpd_req_t *req)
@@ -471,6 +496,16 @@ static esp_err_t http_post_save(httpd_req_t *req)
         wifi_mgr_connect(ssid, pass);
     }
     return ESP_OK;
+}
+
+esp_err_t wifi_mgr_start_portal_ssid(const char *ssid)
+{
+    if (ssid && ssid[0]) {
+        strlcpy(M.portal_ssid, ssid, sizeof(M.portal_ssid));
+    } else {
+        M.portal_ssid[0] = '\0';
+    }
+    return wifi_mgr_start_portal();
 }
 
 esp_err_t wifi_mgr_start_portal(void)
