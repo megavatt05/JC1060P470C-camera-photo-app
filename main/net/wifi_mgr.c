@@ -28,6 +28,7 @@
 #include "sdkconfig.h"
 
 #include "net/speed_test.h"
+#include "net/log_server.h"
 #include "net/wifi_mgr.h"
 
 static const char *TAG = "wifi_mgr";
@@ -37,7 +38,7 @@ static const char *TAG = "wifi_mgr";
 #define NVS_PASS            "pass"
 #define AP_SSID             "CamBrowser-Setup"
 #define AP_CHANNEL          6
-#define HTTP_PORT           8080
+#define HTTP_PORT           80
 #define MAX_RETRY           7
 #define CONNECT_TIMEOUT_MS  20000
 
@@ -159,7 +160,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 
     if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
-        status_set("портал 192.168.4.1:8080");
+        status_set("откройте http://192.168.4.1");
     }
 }
 
@@ -360,22 +361,61 @@ esp_err_t wifi_mgr_connect(const char *ssid, const char *password)
 
 /* ---- SoftAP + HTTP ------------------------------------------------------ */
 
+
+/* HTML страница настройки (порт 80 → только http://192.168.4.1) */
+static const char *PORTAL_HTML =
+    "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>CamBrowser Wi-Fi</title>"
+    "<style>"
+    "body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;"
+    "margin:0;padding:24px;line-height:1.4}"
+    "h1{color:#58a6ff;font-size:1.6rem;margin:0 0 8px}"
+    "p{color:#8b949e;margin:0 0 16px}"
+    "label{display:block;margin:12px 0 4px;color:#c9d1d9}"
+    "input{width:100%;max-width:360px;box-sizing:border-box;padding:12px;font-size:16px;"
+    "border-radius:8px;border:1px solid #30363d;background:#161b22;color:#e6edf3}"
+    "button{margin-top:16px;padding:12px 20px;font-size:16px;border:0;border-radius:8px;"
+    "background:#238636;color:#fff;width:100%;max-width:360px}"
+    "</style></head><body>"
+    "<h1>Настройка Wi-Fi</h1>"
+    "<p>CamBrowser · только сеть <b>2.4&nbsp;ГГц</b></p>"
+    "<form method=\"POST\" action=\"/save\">"
+    "<label>Имя сети (SSID)</label>"
+    "<input name=\"ssid\" required maxlength=\"32\" autocomplete=\"username\" placeholder=\"например ufanet30\">"
+    "<label>Пароль</label>"
+    "<input name=\"pass\" type=\"password\" maxlength=\"64\" autocomplete=\"current-password\">"
+    "<button type=\"submit\">Сохранить и подключить</button>"
+    "</form>"
+    "<p style=\"margin-top:24px;font-size:0.9rem\">После сохранения плата уйдёт в вашу сеть.</p>"
+    "</body></html>";
+
+static esp_err_t http_send_portal(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    return httpd_resp_send(req, PORTAL_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t http_get_root(httpd_req_t *req)
 {
-    const char *page =
-        "<!DOCTYPE html><html><head><meta charset=utf-8>"
-        "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-        "<title>Wi-Fi</title>"
-        "<style>body{font-family:sans-serif;background:#111;color:#eee;margin:1rem}"
-        "input,button{display:block;width:100%;max-width:20rem;margin:.5rem 0;padding:.6rem}"
-        "button{background:#06c;color:#fff;border:0;border-radius:6px}</style></head><body>"
-        "<h1>CamBrowser Wi-Fi</h1><p>Только 2.4 ГГц</p>"
-        "<form method=POST action=/save>"
-        "<input name=ssid placeholder=SSID required maxlength=32>"
-        "<input name=pass type=password placeholder=Пароль maxlength=64>"
-        "<button>Сохранить</button></form></body></html>";
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_sendstr(req, page);
+    return http_send_portal(req);
+}
+
+/* Captive portal probes (Android / iOS / Windows) — редирект на форму */
+static esp_err_t http_captive(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+static esp_err_t http_favicon(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
 }
 
 static void form_get(const char *body, const char *key, char *out, size_t out_sz)
@@ -390,15 +430,22 @@ static void form_get(const char *body, const char *key, char *out, size_t out_sz
     p += strlen(k);
     size_t i = 0;
     while (*p && *p != '&' && i + 1 < out_sz) {
-        out[i++] = (*p == '+') ? ' ' : *p;
-        p++;
+        char c = *p++;
+        if (c == '+') {
+            c = ' ';
+        } else if (c == '%' && p[0] && p[1]) {
+            char hex[3] = { p[0], p[1], 0 };
+            c = (char)strtol(hex, NULL, 16);
+            p += 2;
+        }
+        out[i++] = c;
     }
     out[i] = '\0';
 }
 
 static esp_err_t http_post_save(httpd_req_t *req)
 {
-    char body[200];
+    char body[256];
     int n = httpd_req_recv(req, body, sizeof(body) - 1);
     if (n <= 0) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty");
@@ -411,8 +458,13 @@ static esp_err_t http_post_save(httpd_req_t *req)
     form_get(body, "pass", pass, sizeof(pass));
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_sendstr(req, "<html><body style='background:#111;color:#eee'>"
-                            "<p>Подключаюсь...</p></body></html>");
+    httpd_resp_sendstr(req,
+        "<!DOCTYPE html><html><head><meta charset=utf-8>"
+        "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+        "<title>OK</title></head>"
+        "<body style=\"background:#0d1117;color:#e6edf3;font-family:sans-serif;padding:24px\">"
+        "<h1>Сохранено</h1><p>Подключаюсь к сети… Можно закрыть эту страницу.</p>"
+        "</body></html>");
 
     if (ssid[0]) {
         wifi_mgr_stop_portal();
@@ -428,6 +480,9 @@ esp_err_t wifi_mgr_start_portal(void)
 #else
     ESP_ERROR_CHECK(stack_init());
     M.do_connect = false;
+
+    /* порт 80: останавливаем log_server, иначе httpd_start fail */
+    log_server_stop();
 
     if (!M.netif_ap) {
         M.netif_ap = esp_netif_create_default_wifi_ap();
@@ -449,17 +504,33 @@ esp_err_t wifi_mgr_start_portal(void)
 
     if (!M.httpd) {
         httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-        hc.server_port = HTTP_PORT;
-        hc.max_uri_handlers = 4;
+        hc.server_port = HTTP_PORT; /* 80 → http://192.168.4.1/ без порта */
+        hc.max_uri_handlers = 12;
+        hc.lru_purge_enable = true;
         if (httpd_start(&M.httpd, &hc) == ESP_OK) {
-            httpd_uri_t a = { .uri = "/", .method = HTTP_GET, .handler = http_get_root };
-            httpd_uri_t b = { .uri = "/save", .method = HTTP_POST, .handler = http_post_save };
-            httpd_register_uri_handler(M.httpd, &a);
-            httpd_register_uri_handler(M.httpd, &b);
+            const httpd_uri_t uris[] = {
+                { .uri = "/", .method = HTTP_GET, .handler = http_get_root },
+                { .uri = "/save", .method = HTTP_POST, .handler = http_post_save },
+                { .uri = "/generate_204", .method = HTTP_GET, .handler = http_captive },
+                { .uri = "/gen_204", .method = HTTP_GET, .handler = http_captive },
+                { .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = http_captive },
+                { .uri = "/library/test/success.html", .method = HTTP_GET, .handler = http_captive },
+                { .uri = "/ncsi.txt", .method = HTTP_GET, .handler = http_captive },
+                { .uri = "/connecttest.txt", .method = HTTP_GET, .handler = http_captive },
+                { .uri = "/favicon.ico", .method = HTTP_GET, .handler = http_favicon },
+            };
+            for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
+                httpd_register_uri_handler(M.httpd, &uris[i]);
+            }
+            ESP_LOGI(TAG, "HTTP портал на порту %d", HTTP_PORT);
+        } else {
+            ESP_LOGE(TAG, "httpd_start на :80 не удался");
+            status_set("ошибка HTTP :80");
+            return ESP_FAIL;
         }
     }
     M.state = WIFI_MGR_AP_MODE;
-    status_set("портал CamBrowser-Setup");
+    status_set("http://192.168.4.1");
     return ESP_OK;
 #endif
 }
