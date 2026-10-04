@@ -130,6 +130,7 @@ typedef enum {
     ST_FILMS,               /* keyboard: search the films catalog      */
     ST_FILMSR,              /* films search results                    */
     ST_WIFI,                /* менеджер Wi‑Fi: скан / портал / тест     */
+    ST_WIFI_PASS,           /* ввод пароля сети на экранной клавиатуре */
 #endif
 } browser_state_t;
 
@@ -437,7 +438,7 @@ static const char *kb_bottom_label(size_t i)
     /* on the media URL / films search screens the engine slot doubles as
      * CANCEL */
     if (kb_bottom[i].id == BTN_ENGINE &&
-        (br.state == ST_URLIN || br.state == ST_FILMS)) {
+        (br.state == ST_URLIN || br.state == ST_FILMS || br.state == ST_WIFI_PASS)) {
         return "НАЗАД";
     }
 #endif
@@ -611,6 +612,8 @@ static const struct { const char *name; const char *url; } video_presets[] = {
 #define VIDEO_PRESETS_N (sizeof(video_presets) / sizeof(video_presets[0]))
 
 /* HOME: three app launcher cards in the content zone */
+static char wifi_pending_ssid[33]; /* SSID выбранной сети, ждём пароль */
+
 static const ui_button_t home_apps[] = {
     { 20,  108, 320, 142, "РАДИО",  BTN_RADIO, 3 },
     { 352, 108, 320, 142, "ВИДЕО",  BTN_VIDEO, 3 },
@@ -1206,6 +1209,30 @@ static void draw_wifi(uint16_t *fb)
     ui_button(fb, LCD_W, LCD_H, &home, false);
 }
 
+
+static void draw_wifi_pass(uint16_t *fb)
+{
+    ui_fill_rect(fb, LCD_W, LCD_H, 0, 0, LCD_W, LCD_H, UI_COLOR_BG);
+    draw_status_bar(fb);
+    ui_text(fb, LCD_W, LCD_H, 16, 56, "Пароль Wi-Fi", 2, UI_COLOR_FG, UI_COLOR_BG);
+    char line[80];
+    snprintf(line, sizeof(line), "Сеть: %s", wifi_pending_ssid[0] ? wifi_pending_ssid : "?");
+    ui_text(fb, LCD_W, LCD_H, 16, 96, line, 2, UI_COLOR_ACCENT, UI_COLOR_BG);
+
+    /* поле пароля */
+    ui_rrect(fb, LCD_W, LCD_H, 16, 140, LCD_W - 16, 200, 8, UI_COLOR_PANEL);
+    const char *show = br.query[0] ? br.query : "введите пароль...";
+    ui_text(fb, LCD_W, LCD_H, 28, 160, show, 2,
+            br.query[0] ? UI_COLOR_FG : UI_COLOR_DIM, UI_COLOR_PANEL);
+
+    ui_button_t bgo = { LCD_W - 200, 140, 180, 56, "GO", BTN_GO, 2 };
+    ui_button(fb, LCD_W, LCD_H, &bgo, false);
+    ui_button_t bback = { 16, LCD_H - 60, 180, 56, "НАЗАД", BTN_HOME, 0 };
+    ui_button(fb, LCD_W, LCD_H, &bback, false);
+
+    draw_keyboard(fb);
+}
+
 static void wifi_handle_tap(int x, int y)
 {
     ui_button_t bscan   = { 16,  180, 220, 56, "СКАН",     BTN_WIFI_SCAN,   2 };
@@ -1272,14 +1299,16 @@ static void wifi_handle_tap(int x, int y)
             if (ap->is_open) {
                 busy_stage("открытая — connect");
                 wifi_mgr_connect(ap->ssid, "");
+                busy_close();
             } else {
-                /* пароль вводят на телефоне; SSID уже в форме */
-                busy_stage("портал: введите пароль");
-                wifi_mgr_start_portal_ssid(ap->ssid);
-                busy_stage("http://192.168.4.1");
-                vTaskDelay(pdMS_TO_TICKS(800));
+                /* пароль на экранной клавиатуре платы */
+                strlcpy(wifi_pending_ssid, ap->ssid, sizeof(wifi_pending_ssid));
+                br.query[0] = '\0';
+                br.kb_ru = false;
+                busy_close();
+                br.state = ST_WIFI_PASS;
+                draw_screen();
             }
-            busy_close();
             return;
         }
     }
@@ -1941,6 +1970,9 @@ static void draw_screen(void)
     case ST_WIFI:
 #if CONFIG_EB_WIFI_ENABLE
         draw_wifi(fb);
+        break;
+    case ST_WIFI_PASS:
+        draw_wifi_pass(fb);
         break;
 #endif
     case ST_FILMSR:   draw_filmsr(fb);       break;
