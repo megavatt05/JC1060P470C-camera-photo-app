@@ -1257,21 +1257,27 @@ static void wifi_handle_tap(int x, int y)
         busy_close();
         return;
     }
+    /* y0 как в draw_wifi (288) */
     int n = wifi_mgr_scan_count();
-    int y0 = 280;
-    for (int i = 0; i < n && i < 6; i++) {
+    int y0 = 288;
+    for (int i = 0; i < n && i < 5; i++) {
         ui_button_t row = { 16, y0 + i * 52, LCD_W - 32, 48, "", BTN_WIFI_ROW + i, 2 };
         if (ui_button_hit(&row, x, y)) {
             const wifi_mgr_ap_t *ap = wifi_mgr_scan_get(i);
+            if (!ap) {
+                return;
+            }
             busy_open("Сеть");
-            if (ap) {
-                busy_stage(ap->ssid);
-                if (ap->is_open) {
-                    wifi_mgr_connect(ap->ssid, "");
-                } else {
-                    busy_stage("пароль -> ПОРТАЛ");
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                }
+            busy_stage(ap->ssid);
+            if (ap->is_open) {
+                busy_stage("открытая — connect");
+                wifi_mgr_connect(ap->ssid, "");
+            } else {
+                /* пароль вводят на телефоне; SSID уже в форме */
+                busy_stage("портал: введите пароль");
+                wifi_mgr_start_portal_ssid(ap->ssid);
+                busy_stage("http://192.168.4.1");
+                vTaskDelay(pdMS_TO_TICKS(800));
             }
             busy_close();
             return;
