@@ -2310,7 +2310,13 @@ static void browser_task(void *arg)
             if (tap) {
                 int id = radio_hit(tap_x, tap_y);
                 if (id >= BTN_STATION && id < (int)(BTN_STATION + RADIO_STATIONS_N)) {
-                    media_radio_start(radio_stations[id - BTN_STATION].url);
+                    /* не рвать PREPARING — иначе STOP + Read timeout */
+                    media_state_t st = media_get_state();
+                    if (st == MEDIA_STATE_CONNECTING) {
+                        ESP_LOGW("browser", "радио: ждём текущий старт (CONNECTING)");
+                    } else {
+                        media_radio_start(radio_stations[id - BTN_STATION].url);
+                    }
                     draw_screen();
                 } else {
                     switch (id) {
