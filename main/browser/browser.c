@@ -1227,7 +1227,8 @@ static void draw_wifi_pass(uint16_t *fb)
 
     ui_button_t bgo = { LCD_W - 200, 140, 180, 56, "GO", BTN_GO, 2 };
     ui_button(fb, LCD_W, LCD_H, &bgo, false);
-    ui_button_t bback = { 16, LCD_H - 60, 180, 56, "НАЗАД", BTN_HOME, 0 };
+    /* НАЗАД выше клавиатуры (CONTENT_Y1=368) */
+    ui_button_t bback = { 16, 300, 180, 56, "НАЗАД", BTN_HOME, 0 };
     ui_button(fb, LCD_W, LCD_H, &bback, false);
 
     draw_keyboard(fb);
@@ -2092,6 +2093,65 @@ static void browser_task(void *arg)
             if (tap) {
                 wifi_handle_tap(tap_x, tap_y);
                 draw_screen();
+            }
+            break;
+        case ST_WIFI_PASS:
+            /* экран пароля: клавиатура + НАЗАД + GO */
+            if (tap) {
+                ui_button_t bback = { 16, 300, 180, 56, "НАЗАД", BTN_HOME, 0 };
+                ui_button_t bgo = { LCD_W - 200, 140, 180, 56, "GO", BTN_GO, 2 };
+                if (ui_button_hit(&bback, tap_x, tap_y)) {
+                    br.state = ST_WIFI;
+                    draw_screen();
+                } else if (ui_button_hit(&bgo, tap_x, tap_y) && wifi_pending_ssid[0]) {
+                    busy_open("Wi-Fi");
+                    busy_stage(wifi_pending_ssid);
+                    wifi_mgr_connect(wifi_pending_ssid, br.query);
+                    busy_close();
+                    br.state = ST_WIFI;
+                    draw_screen();
+                } else {
+                    int id = keyboard_hit(tap_x, tap_y);
+                    if (id >= BTN_CHAR) {
+                        query_append_cp((uint32_t)id);
+                        draw_screen();
+                    } else {
+                        switch (id) {
+                        case BTN_KBD:
+                            br.kb_ru = !br.kb_ru;
+                            draw_screen();
+                            break;
+                        case BTN_DEL: {
+                            size_t len = strlen(br.query);
+                            while (len > 0 &&
+                                   (((unsigned char)br.query[len - 1]) & 0xC0) == 0x80) {
+                                len--;
+                            }
+                            if (len > 0) {
+                                br.query[len - 1] = '\0';
+                            }
+                            draw_screen();
+                            break;
+                        }
+                        case BTN_SPC:
+                            query_append_cp(' ');
+                            draw_screen();
+                            break;
+                        case BTN_GO:
+                            if (wifi_pending_ssid[0]) {
+                                busy_open("Wi-Fi");
+                                busy_stage(wifi_pending_ssid);
+                                wifi_mgr_connect(wifi_pending_ssid, br.query);
+                                busy_close();
+                                br.state = ST_WIFI;
+                                draw_screen();
+                            }
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                }
             }
             break;
 #endif
