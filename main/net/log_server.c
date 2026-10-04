@@ -179,25 +179,34 @@ static esp_err_t root_http_handler(httpd_req_t *req)
     return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
 }
 
+static httpd_handle_t s_httpd;
+
+esp_err_t log_server_stop(void)
+{
+    if (s_httpd) {
+        httpd_stop(s_httpd);
+        s_httpd = NULL;
+        ESP_LOGI(TAG, "httpd остановлен (порт 80 свободен для портала)");
+    }
+    return ESP_OK;
+}
+
 esp_err_t log_server_start(void)
 {
-    static bool started;
-
     if (!s_ring.hooked) {
         s_ring.prev_sink = esp_log_set_vprintf(log_ring_vprintf);
         s_ring.hooked = true;
         ESP_LOGI(TAG, "кольцо логов (%u КБ)", LOG_RING_SIZE / 1024);
     }
-    if (started) {
+    if (s_httpd) {
         return ESP_OK;
     }
 
-    httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
     cfg.max_uri_handlers = 8;
-    esp_err_t err = httpd_start(&server, &cfg);
+    esp_err_t err = httpd_start(&s_httpd, &cfg);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "httpd_start: %s", esp_err_to_name(err));
         return err;
@@ -208,11 +217,9 @@ esp_err_t log_server_start(void)
                               .handler = speed_http_handler, .user_ctx = NULL };
     httpd_uri_t uri_root = { .uri = "/", .method = HTTP_GET,
                              .handler = root_http_handler, .user_ctx = NULL };
-    httpd_register_uri_handler(server, &uri_log);
-    httpd_register_uri_handler(server, &uri_speed);
-    httpd_register_uri_handler(server, &uri_root);
-
-    started = true;
+    httpd_register_uri_handler(s_httpd, &uri_log);
+    httpd_register_uri_handler(s_httpd, &uri_speed);
+    httpd_register_uri_handler(s_httpd, &uri_root);
     ESP_LOGI(TAG, "log: http://%s/log  speed: http://%s/speed",
              app_net_ip_str(), app_net_ip_str());
     return ESP_OK;
